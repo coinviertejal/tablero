@@ -12,19 +12,35 @@ BUCKET = "expedientes"
 
 
 def configured() -> bool:
-    return bool(st.secrets.get("SUPABASE_URL") and st.secrets.get("SUPABASE_ANON_KEY"))
+    return bool(st.secrets.get("SUPABASE_URL") and public_key())
+
+
+def public_key() -> str:
+    return st.secrets.get("SUPABASE_PUBLISHABLE_KEY") or st.secrets.get("SUPABASE_ANON_KEY") or ""
 
 
 @st.cache_resource
 def public_client() -> Client:
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
+    return create_client(st.secrets["SUPABASE_URL"], public_key())
 
 
 def client_with_token(access_token: str) -> Client:
-    client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
+    client = create_client(st.secrets["SUPABASE_URL"], public_key())
     client.postgrest.auth(access_token)
     client.storage.auth(access_token)
     return client
+
+
+def access_profile(client: Client, email: str) -> dict | None:
+    rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo").eq("email", email.lower()).execute().data
+    return rows[0] if rows else None
+
+
+def register_access(client: Client):
+    try:
+        client.rpc("registrar_acceso").execute()
+    except Exception:
+        pass
 
 
 def valid_official_email(email: str) -> bool:

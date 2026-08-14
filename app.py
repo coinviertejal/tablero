@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from data import MUNICIPIOS_JALISCO
-from db import client_with_token, configured, download_project_images, public_client, upload_files, valid_official_email
+from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
 from exports import build_docx, build_pdf
 
 st.set_page_config(page_title="COINVIERTE | Gestión Institucional", page_icon="🏛️", layout="wide")
@@ -95,10 +95,43 @@ def login():
     st.subheader("Acceso institucional")
     if not configured():
         st.warning("Modo demostración: falta configurar Supabase. Puedes ingresar con cualquier correo @jalisco.gob.mx.")
-    with st.form("login"):
-        email = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
-        password = st.text_input("Contraseña", type="password")
-        submitted = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+    login_tab, activation_tab = st.tabs(["Ingresar", "Activar acceso con código"])
+    with login_tab:
+        with st.form("login"):
+            email = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
+            password = st.text_input("Contraseña", type="password")
+            submitted = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+    with activation_tab:
+        st.caption("Utiliza el código temporal entregado por el administrador. El código sólo puede usarse una vez.")
+        with st.form("activate_access"):
+            activation_email = st.text_input("Correo autorizado", placeholder="nombre@jalisco.gob.mx", key="activation_email")
+            code = st.text_input("Código temporal", max_chars=8)
+            new_password = st.text_input("Crea una contraseña", type="password", key="new_password")
+            confirm_password = st.text_input("Confirma la contraseña", type="password")
+            activate = st.form_submit_button("Activar mi acceso", type="primary", use_container_width=True)
+    if activate:
+        if not configured():
+            st.error("Primero debes conectar Supabase.")
+        elif not valid_official_email(activation_email):
+            st.error("El correo debe pertenecer a @jalisco.gob.mx.")
+        elif len(new_password) < 8:
+            st.error("La contraseña debe tener al menos 8 caracteres.")
+        elif new_password != confirm_password:
+            st.error("Las contraseñas no coinciden.")
+        else:
+            try:
+                auth = public_client().auth.sign_up({"email": activation_email.lower().strip(), "password": new_password})
+                redeemed = public_client().rpc("canjear_codigo_acceso", {"p_email": activation_email.lower().strip(),
+                                                                          "p_codigo": code.strip()}).execute().data
+                if not redeemed:
+                    st.error("El código es incorrecto, ya fue utilizado o está vencido.")
+                else:
+                    if auth.session and auth.user:
+                        st.success("Acceso activado correctamente. Ya puedes ingresar.")
+                    else:
+                        st.success("Acceso activado. Revisa tu correo si Supabase solicita confirmar la cuenta.")
+            except Exception as exc:
+                st.error(f"No fue posible activar el acceso: {exc}")
     if submitted:
         if not valid_official_email(email):
             st.error("El acceso está limitado a cuentas @jalisco.gob.mx.")
@@ -112,8 +145,18 @@ def login():
                     public_client().auth.sign_out()
                     st.error("La cuenta no pertenece al dominio autorizado.")
                     return
-                st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id)}
                 st.session_state.access_token = auth.session.access_token
+                user_client = client_with_token(auth.session.access_token)
+                profile = access_profile(user_client, auth.user.email)
+                if not profile or not profile.get("activo"):
+                    public_client().auth.sign_out()
+                    st.session_state.pop("access_token", None)
+                    st.error("Tu acceso no está autorizado o fue suspendido. Contacta al administrador.")
+                    return
+                st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id),
+                                         "nombre": profile.get("nombre") or auth.user.email,
+                                         "rol": profile.get("rol", "usuario")}
+                register_access(user_client)
                 st.rerun()
             except Exception:
                 st.error("No fue posible iniciar sesión. Verifica el correo y la contraseña.")
@@ -519,6 +562,72 @@ def view_active_projects(direction: str):
         st.rerun()
 
 
+def user_management():
+    st.title("Gestión de usuarios")
+    if st.session_state.user.get("rol") != "administrador":
+        st.error("No tienes permisos para acceder a este módulo.")
+        return
+    client = client_with_token(st.session_state.access_token)
+    create_tab, users_tab = st.tabs(["Generar código temporal", "Usuarios autorizados"])
+    with create_tab:
+        st.markdown("### Autorizar a una persona")
+        with st.form("create_access_code"):
+            name = st.text_input("Nombre de la persona")
+            email = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
+            hours = st.selectbox("Vigencia del código", [24, 48, 72, 168],
+                                 format_func=lambda value: "7 días" if value == 168 else f"{value} horas")
+            create_code = st.form_submit_button("Generar código de acceso", type="primary", use_container_width=True)
+        if create_code:
+            if not valid_official_email(email):
+                st.error("Sólo se pueden autorizar correos @jalisco.gob.mx.")
+            else:
+                try:
+                    result = client.rpc("crear_codigo_acceso", {"p_email": email.lower().strip(),
+                                                                 "p_nombre": name.strip(), "p_horas": hours}).execute().data
+                    record = result[0] if isinstance(result, list) else result
+                    st.session_state.generated_code = record
+                    st.session_state.generated_email = email.lower().strip()
+                except Exception as exc:
+                    st.error(f"No fue posible generar el código: {exc}")
+        if st.session_state.get("generated_code"):
+            record = st.session_state.generated_code
+            st.success(f"Código generado para {st.session_state.generated_email}")
+            st.code(record.get("codigo", ""), language=None)
+            st.caption(f"Vence: {record.get('vence', '')}. Compártelo únicamente con la persona autorizada.")
+
+    with users_tab:
+        rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo,ultimo_acceso,created_at").order("created_at", desc=True).execute().data
+        if not rows:
+            st.info("Todavía no hay usuarios registrados.")
+        else:
+            st.dataframe([{ "Nombre": row.get("nombre"), "Correo": row.get("email"), "Rol": row.get("rol"),
+                            "Estado": "Activo" if row.get("activo") else "Suspendido / pendiente",
+                            "Último acceso": row.get("ultimo_acceso") or "Sin acceso"} for row in rows],
+                         use_container_width=True, hide_index=True)
+            manageable = [row for row in rows if row.get("rol") != "administrador"]
+            if manageable:
+                labels = {f"{row.get('nombre') or 'Sin nombre'} — {row['email']}": row for row in manageable}
+                selected_label = st.selectbox("Administrar usuario", list(labels.keys()))
+                selected = labels[selected_label]
+                c1, c2 = st.columns(2)
+                if selected.get("activo"):
+                    if c1.button("Suspender acceso", use_container_width=True):
+                        client.table("usuarios_autorizados").update({"activo": False}).eq("id", selected["id"]).execute()
+                        st.success("Acceso suspendido.")
+                        st.rerun()
+                else:
+                    if c1.button("Reactivar acceso", use_container_width=True):
+                        client.table("usuarios_autorizados").update({"activo": True}).eq("id", selected["id"]).execute()
+                        st.success("Acceso reactivado.")
+                        st.rerun()
+                if c2.button("Generar nuevo código", use_container_width=True):
+                    result = client.rpc("crear_codigo_acceso", {"p_email": selected["email"],
+                                                                 "p_nombre": selected.get("nombre") or "", "p_horas": 24}).execute().data
+                    st.session_state.generated_code = result[0] if isinstance(result, list) else result
+                    st.session_state.generated_email = selected["email"]
+                    st.success("Nuevo código generado. Consúltalo en la primera pestaña.")
+
+
 def programs():
     direction = st.session_state.get("program_direction")
     action = st.session_state.get("program_action")
@@ -630,6 +739,10 @@ else:
         if st.button("Comités", use_container_width=True):
             st.session_state.page = "Comités"
             st.rerun()
+        if st.session_state.user.get("rol") == "administrador":
+            if st.button("Gestión de usuarios", use_container_width=True):
+                st.session_state.page = "Gestión de usuarios"
+                st.rerun()
         st.divider()
         if st.button("Cerrar sesión", use_container_width=True):
             st.session_state.clear()
@@ -637,4 +750,5 @@ else:
     page = st.session_state.get("page", "Inicio")
     if page == "Inicio": landing()
     elif page == "Programas / Proyectos": programs()
+    elif page == "Gestión de usuarios": user_management()
     else: placeholder(page)
