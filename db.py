@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import re
+import uuid
+from pathlib import Path
+
+import streamlit as st
+from supabase import Client, create_client
+
+ALLOWED_DOMAIN = "@jalisco.gob.mx"
+BUCKET = "expedientes"
+
+
+def configured() -> bool:
+    return bool(st.secrets.get("SUPABASE_URL") and st.secrets.get("SUPABASE_ANON_KEY"))
+
+
+@st.cache_resource
+def public_client() -> Client:
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
+
+
+def client_with_token(access_token: str) -> Client:
+    client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
+    client.postgrest.auth(access_token)
+    client.storage.auth(access_token)
+    return client
+
+
+def valid_official_email(email: str) -> bool:
+    return email.strip().lower().endswith(ALLOWED_DOMAIN)
+
+
+def safe_name(name: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).name)
+    return clean[:120] or "archivo"
+
+
+def upload_files(client: Client, project_id: str, category: str, files: list) -> list[dict]:
+    records = []
+    for item in files:
+        path = f"{project_id}/{category}/{uuid.uuid4().hex}_{safe_name(item.name)}"
+        client.storage.from_(BUCKET).upload(
+            path,
+            item.getvalue(),
+            {"content-type": item.type or "application/octet-stream"},
+        )
+        records.append({
+            "proyecto_id": project_id,
+            "categoria": category,
+            "nombre_archivo": item.name,
+            "ruta_storage": path,
+            "mime_type": item.type,
+            "tamano_bytes": item.size,
+        })
+    if records:
+        client.table("documentos").insert(records).execute()
+    return records
+
