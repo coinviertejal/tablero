@@ -8,6 +8,7 @@ import streamlit as st
 
 from data import MUNICIPIOS_JALISCO
 from db import client_with_token, configured, public_client, upload_files, valid_official_email
+from exports import build_docx, build_pdf
 
 st.set_page_config(page_title="COINVIERTE | Gestión Institucional", page_icon="🏛️", layout="wide")
 
@@ -166,10 +167,29 @@ def project_form(direction: str, project=None):
                                   accept_multiple_files=True, key="photos")
 
         st.markdown("### Monitoreo y Seguimiento")
-        st.info("Bloque preparado. En el siguiente paso definiremos indicadores, metas, avances, fechas y responsables.")
-        save = st.form_submit_button("Guardar proyecto", type="primary", use_container_width=True)
+        previous_monitoring = project.get("monitoreo", {}) or {}
+        m1, m2 = st.columns(2)
+        statuses = ["Sin iniciar", "En planeación", "En ejecución", "Suspendido", "Concluido"]
+        current_status = previous_monitoring.get("estatus", "Sin iniciar")
+        status = m1.selectbox("Estatus del proyecto", statuses,
+                              index=statuses.index(current_status) if current_status in statuses else 0)
+        responsible = m2.text_input("Responsable del seguimiento", value=previous_monitoring.get("responsable", ""))
+        m3, m4 = st.columns(2)
+        period = m3.text_input("Periodo de seguimiento", value=previous_monitoring.get("periodo", ""),
+                               placeholder="Ej. enero-junio de 2026")
+        progress = m4.slider("Porcentaje de avance", 0, 100, int(previous_monitoring.get("avance", 0)), 5)
+        monitoring_progress = st.text_area("Principales avances", value=previous_monitoring.get("avances", ""), height=100)
+        pending = st.text_area("Pendientes o riesgos", value=previous_monitoring.get("pendientes", ""), height=90)
+        next_actions = st.text_area("Próximas acciones", value=previous_monitoring.get("proximas_acciones", ""), height=90)
+        observations = st.text_area("Observaciones de seguimiento", value=previous_monitoring.get("observaciones", ""), height=90)
 
-    if save:
+        st.markdown("### Ficha del proyecto")
+        st.caption("La ficha incluye información general, monitoreo y evidencia fotográfica. Gestión Documental no se muestra.")
+        b1, b2 = st.columns(2)
+        preview = b1.form_submit_button("Previsualizar ficha", use_container_width=True)
+        save = b2.form_submit_button("Guardar proyecto", type="primary", use_container_width=True)
+
+    if save or preview:
         errors = []
         if not name.strip() or not applicant.strip() or not general.strip():
             errors.append("Completa todos los campos obligatorios.")
@@ -186,7 +206,18 @@ def project_form(direction: str, project=None):
         payload = {"direccion": direction, "nombre": name.strip(), "solicitante": applicant.strip(),
                    "municipio": municipality, "anio_inicio": int(year), "monto": amount,
                    "objetivo_general": general.strip(), "objetivos_especificos": clean_objectives,
+                   "monitoreo": {"estatus": status, "responsable": responsible.strip(), "periodo": period.strip(),
+                                  "avance": int(progress), "avances": monitoring_progress.strip(),
+                                  "pendientes": pending.strip(), "proximas_acciones": next_actions.strip(),
+                                  "observaciones": observations.strip()},
                    "creado_por": st.session_state.user["id"]}
+        if preview:
+            photo_bytes = [photo.getvalue() for photo in photos]
+            st.session_state.ficha_data = payload
+            st.session_state.ficha_photos = photo_bytes
+            st.session_state.ficha_pdf = build_pdf(payload, photo_bytes, "assets/logo_coinvierte.jpeg")
+            st.session_state.ficha_docx = build_docx(payload, photo_bytes, "assets/logo_coinvierte.jpeg")
+            st.rerun()
         if not configured():
             st.success("Proyecto validado correctamente (modo demostración; aún no se guarda en base de datos).")
             st.json(payload)
@@ -206,6 +237,53 @@ def project_form(direction: str, project=None):
             st.success("Proyecto guardado correctamente.")
         except Exception as exc:
             st.error(f"No fue posible guardar el proyecto: {exc}")
+
+    if st.session_state.get("ficha_data"):
+        render_project_preview(st.session_state.ficha_data, st.session_state.get("ficha_photos", []))
+
+
+def render_project_preview(data: dict, photos: list[bytes]):
+    st.markdown("---")
+    st.markdown("## Previsualización de la ficha")
+    st.caption("Gestión Documental se excluye intencionalmente de esta ficha.")
+    st.markdown(f'''<div class="card card-blue">
+      <div class="card-icon">FP</div><h3>{data.get("nombre") or "Proyecto sin nombre"}</h3>
+      <p class="muted"><b>{data.get("direccion", "")}</b><br>{data.get("solicitante", "")} · {data.get("municipio", "")} · {data.get("anio_inicio", "")}</p>
+      <p><b>Monto:</b> ${float(data.get("monto", 0)):,.2f} MXN</p></div>''', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### Información General")
+        st.markdown(f"**Objetivo general**\n\n{data.get('objetivo_general') or 'Sin información'}")
+        st.markdown("**Objetivos específicos**")
+        for objective in data.get("objetivos_especificos", []):
+            st.markdown(f"- {objective}")
+    with c2:
+        st.markdown("### Monitoreo y Seguimiento")
+        monitoring = data.get("monitoreo", {})
+        st.progress(int(monitoring.get("avance", 0)), text=f"Avance: {monitoring.get('avance', 0)}%")
+        st.markdown(f"**Estatus:** {monitoring.get('estatus', 'Sin información')}  \n"
+                    f"**Responsable:** {monitoring.get('responsable') or 'Sin información'}  \n"
+                    f"**Periodo:** {monitoring.get('periodo') or 'Sin información'}")
+        for label, key in [("Principales avances","avances"),("Pendientes o riesgos","pendientes"),
+                           ("Próximas acciones","proximas_acciones"),("Observaciones","observaciones")]:
+            if monitoring.get(key):
+                st.markdown(f"**{label}**\n\n{monitoring[key]}")
+    st.markdown("### Evidencia Fotográfica")
+    if photos:
+        columns = st.columns(2)
+        for index, photo in enumerate(photos):
+            columns[index % 2].image(photo, caption=f"Fotografía {index + 1}", use_container_width=True)
+    else:
+        st.info("No se cargó evidencia fotográfica para esta ficha.")
+    name = "_".join((data.get("nombre") or "proyecto").lower().split())[:60]
+    d1, d2, d3 = st.columns([1,1,2])
+    d1.download_button("Descargar PDF", st.session_state.ficha_pdf, f"ficha_{name}.pdf", "application/pdf", use_container_width=True)
+    d2.download_button("Descargar Word", st.session_state.ficha_docx, f"ficha_{name}.docx",
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
+    if d3.button("Cerrar previsualización", use_container_width=True):
+        for key in ["ficha_data", "ficha_photos", "ficha_pdf", "ficha_docx"]:
+            st.session_state.pop(key, None)
+        st.rerun()
 
 
 def programs():

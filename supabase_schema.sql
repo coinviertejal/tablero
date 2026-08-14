@@ -11,10 +11,14 @@ create table if not exists public.proyectos (
   monto numeric(16,2) not null check (monto >= 0),
   objetivo_general text not null,
   objetivos_especificos jsonb not null default '[]'::jsonb,
+  monitoreo jsonb not null default '{}'::jsonb,
   creado_por uuid not null references auth.users(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Compatible con bases creadas con una versión anterior del esquema.
+alter table public.proyectos add column if not exists monitoreo jsonb not null default '{}'::jsonb;
 
 create table if not exists public.documentos (
   id uuid primary key default gen_random_uuid(),
@@ -50,4 +54,3 @@ create policy "usuarios oficiales suben expedientes" on storage.objects for inse
 with check (bucket_id = 'expedientes' and (auth.jwt()->>'email') like '%@jalisco.gob.mx');
 create policy "usuarios oficiales leen expedientes" on storage.objects for select to authenticated
 using (bucket_id = 'expedientes' and (auth.jwt()->>'email') like '%@jalisco.gob.mx');
-
