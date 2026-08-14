@@ -57,3 +57,16 @@ def upload_files(client: Client, project_id: str, category: str, files: list) ->
         client.table("documentos").insert(records).execute()
     return records
 
+
+def download_project_images(client: Client, project_id: str) -> list[bytes]:
+    """Descarga fotografías generales y evidencias de metas que sean imágenes."""
+    rows = (client.table("documentos").select("ruta_storage,mime_type,categoria")
+            .eq("proyecto_id", project_id).in_("categoria", ["fotografia", "evidencia_meta"]).execute().data)
+    images = []
+    for row in rows or []:
+        if (row.get("mime_type") or "").startswith("image/"):
+            try:
+                images.append(client.storage.from_(BUCKET).download(row["ruta_storage"]))
+            except Exception:
+                continue
+    return images
