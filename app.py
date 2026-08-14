@@ -39,6 +39,14 @@ st.markdown("""
 .card-icon { display:inline-flex; align-items:center; justify-content:center; width:46px; height:46px; border-radius:13px; background:color-mix(in srgb,var(--accent,var(--blue)) 13%,white); color:var(--accent,var(--blue)); font-size:1.3rem; font-weight:800; margin-bottom:.65rem; }
 .card h3 { margin:.15rem 0 .65rem; color:var(--ink); font-size:1.25rem; }
 .muted { color:#647580; line-height:1.5; }
+.choice-card { background:#fff; border:1px solid #dfe7e9; border-top:7px solid var(--accent,var(--blue)); border-radius:20px; padding:2rem 1.8rem 1.65rem; min-height:205px; box-shadow:0 12px 32px rgba(53,67,75,.08); text-align:center; margin-top:.7rem; }
+.choice-card .choice-icon { width:68px; height:68px; border-radius:20px; display:flex; align-items:center; justify-content:center; margin:0 auto 1rem; background:color-mix(in srgb,var(--accent,var(--blue)) 14%,white); color:var(--accent,var(--blue)); font-size:1.6rem; font-weight:800; }
+.choice-card h3 { font-size:1.45rem; margin:.25rem 0 .7rem; }
+.choice-card p { color:#6d7980; margin:0; line-height:1.45; }
+.choice-operations { --accent:var(--blue); } .choice-projects { --accent:var(--green); }
+.choice-new { --accent:var(--orange); } .choice-edit { --accent:var(--purple); }
+.choice-title { text-align:center; margin:.7rem 0 .25rem; }
+.choice-subtitle { text-align:center; color:#69767d; margin-bottom:1.2rem; }
 div[data-testid="stForm"] { background:white; padding:1.55rem; border-radius:18px; border:1px solid #dfe7e9; box-shadow:0 8px 24px rgba(20,55,70,.045); }
 div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--orange); border-bottom:1px solid #e4ebed; padding:.15rem 0 .65rem .75rem; margin-top:1.2rem; }
 .stButton button, .stFormSubmitButton button { border-radius:10px; }
@@ -287,10 +295,61 @@ def render_project_preview(data: dict, photos: list[bytes]):
 
 
 def programs():
-    st.title("Programas / Proyectos")
-    direction = st.radio("Dirección responsable", ["Dirección de Operaciones", "Dirección de Proyectos"], horizontal=True)
-    action = st.radio("¿Qué deseas hacer?", ["Dar de alta nuevo proyecto", "Editar proyecto"], horizontal=True)
-    if action == "Dar de alta nuevo proyecto":
+    direction = st.session_state.get("program_direction")
+    action = st.session_state.get("program_action")
+
+    if not direction:
+        st.markdown('<h1 class="choice-title">Programas / Proyectos</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="choice-subtitle">Selecciona la dirección responsable para continuar</p>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            st.markdown('''<div class="choice-card choice-operations"><div class="choice-icon">DO</div>
+                <h3>Dirección de Operaciones</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
+            if st.button("Ingresar a Operaciones", key="choose_operations", use_container_width=True, type="primary"):
+                st.session_state.program_direction = "Dirección de Operaciones"
+                st.session_state.pop("program_action", None)
+                st.rerun()
+        with c2:
+            st.markdown('''<div class="choice-card choice-projects"><div class="choice-icon">DP</div>
+                <h3>Dirección de Proyectos</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
+            if st.button("Ingresar a Proyectos", key="choose_projects", use_container_width=True, type="primary"):
+                st.session_state.program_direction = "Dirección de Proyectos"
+                st.session_state.pop("program_action", None)
+                st.rerun()
+        return
+
+    if not action:
+        top1, top2 = st.columns([1, 5])
+        if top1.button("← Direcciones", use_container_width=True):
+            st.session_state.pop("program_direction", None)
+            st.rerun()
+        top2.markdown(f"### {direction}")
+        st.markdown('<p class="choice-subtitle">Selecciona la acción que deseas realizar</p>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            st.markdown('''<div class="choice-card choice-new"><div class="choice-icon">＋</div>
+                <h3>Dar de alta nuevo proyecto</h3><p>Crear un expediente e incorporar su información general, documentos y seguimiento.</p></div>''', unsafe_allow_html=True)
+            if st.button("Crear nuevo proyecto", key="choose_new", use_container_width=True, type="primary"):
+                st.session_state.program_action = "new"
+                st.session_state.objective_count = 1
+                st.rerun()
+        with c2:
+            st.markdown('''<div class="choice-card choice-edit"><div class="choice-icon">✎</div>
+                <h3>Editar proyecto</h3><p>Consultar un expediente existente para actualizar su información y seguimiento.</p></div>''', unsafe_allow_html=True)
+            if st.button("Consultar y editar", key="choose_edit", use_container_width=True, type="primary"):
+                st.session_state.program_action = "edit"
+                st.rerun()
+        return
+
+    nav1, nav2 = st.columns([1, 5])
+    if nav1.button("← Acciones", use_container_width=True):
+        st.session_state.pop("program_action", None)
+        for key in ["ficha_data", "ficha_photos", "ficha_pdf", "ficha_docx"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+    nav2.markdown(f"### {direction}")
+
+    if action == "new":
         project_form(direction)
     elif not configured():
         st.info("La consulta y edición estarán disponibles al conectar Supabase.")
@@ -323,6 +382,8 @@ else:
             st.rerun()
         if st.button("Programas / Proyectos", use_container_width=True):
             st.session_state.page = "Programas / Proyectos"
+            st.session_state.pop("program_direction", None)
+            st.session_state.pop("program_action", None)
             st.rerun()
         if st.button("Junta de Gobierno", use_container_width=True):
             st.session_state.page = "Junta de Gobierno"
