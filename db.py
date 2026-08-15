@@ -27,7 +27,7 @@ def public_client() -> Client:
 def client_with_token(access_token: str) -> Client:
     client = create_client(st.secrets["SUPABASE_URL"], public_key())
     client.postgrest.auth(access_token)
-    client.storage.auth(access_token)
+    client.storage.set_auth(access_token)
     return client
 
 
