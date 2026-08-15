@@ -57,6 +57,11 @@ st.markdown("""
 .metric-blue{--metric:var(--blue)} .metric-green{--metric:var(--green)} .metric-orange{--metric:var(--orange)} .metric-purple{--metric:var(--purple)}
 .goal-heading { padding:.75rem 1rem; border-radius:10px; margin:1rem 0 .8rem; font-weight:800; border-left:8px solid var(--status-color); background:color-mix(in srgb,var(--status-color) 10%,white); }
 .status-red{--status-color:#d9534f}.status-yellow{--status-color:#f0ad00}.status-green{--status-color:#009b4c}.status-gray{--status-color:#858e93}
+.year-card { background:#fff; border:1px solid #dfe7e9; border-top:6px solid var(--accent,var(--blue)); border-radius:18px; padding:1.25rem; text-align:center; box-shadow:0 8px 22px rgba(53,67,75,.07); margin-top:.5rem; }
+.year-card h2 { font-size:2rem; margin:.1rem 0; color:var(--accent,var(--blue)); }
+.session-column { background:rgba(255,255,255,.72); border:1px solid #dfe7e9; border-radius:18px; padding:1rem 1rem .4rem; min-height:220px; }
+.session-card { background:#fff; border-left:7px solid var(--accent,var(--blue)); border-radius:13px; padding:1rem 1.1rem; margin:.7rem 0 .35rem; box-shadow:0 5px 16px rgba(53,67,75,.07); }
+.session-card h4 { margin:0 0 .25rem; font-size:1.08rem; }.session-card p { margin:0; color:#738087; font-size:.83rem; }
 @media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,1fr)}}
 div[data-testid="stForm"] { background:white; padding:1.55rem; border-radius:18px; border:1px solid #dfe7e9; box-shadow:0 8px 24px rgba(20,55,70,.045); }
 div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--orange); border-bottom:1px solid #e4ebed; padding:.15rem 0 .65rem .75rem; margin-top:1.2rem; }
@@ -779,6 +784,124 @@ def user_management():
                     st.success("Nuevo código generado. Consúltalo en la primera pestaña.")
 
 
+BOARD_YEARS = [2025, 2026, 2027, 2028, 2029, 2030]
+PRESET_BOARD_SESSIONS = ["Primera (1era)", "Segunda (2da)", "Tercera (3ra)"]
+
+
+def board_year_selector():
+    logo_header()
+    st.markdown('<h1 class="choice-title">Junta de Gobierno</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="choice-subtitle">Selecciona el año que deseas consultar</p>', unsafe_allow_html=True)
+    colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
+    for start in (0, 3):
+        columns = st.columns(3, gap="large")
+        for column, year, color in zip(columns, BOARD_YEARS[start:start + 3], colors[start:start + 3]):
+            with column:
+                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p>Sesiones y acuerdos</p></div>', unsafe_allow_html=True)
+                if st.button(f"Abrir {year}", key=f"board_year_{year}", use_container_width=True, type="primary"):
+                    st.session_state.board_year = year
+                    st.session_state.pop("board_session", None)
+                    st.rerun()
+
+
+def board_session_stub(session: dict):
+    year = st.session_state.board_year
+    if st.button(f"← Volver a sesiones de {year}"):
+        st.session_state.pop("board_session", None)
+        st.rerun()
+    st.markdown(f"## {session.get('nombre')}")
+    st.caption(f"{session.get('tipo')} · Junta de Gobierno {year}")
+    st.info("La interfaz interna de esta sesión se construirá en la siguiente etapa.")
+
+
+def board_search(client, year: int, term: str):
+    if not term.strip():
+        return
+    st.markdown("### Resultados de búsqueda")
+    if not configured():
+        st.info("El buscador quedará activo al conectar la tabla de sesiones y acuerdos en Supabase.")
+        return
+    try:
+        rows = (client.table("acuerdos_junta")
+                .select("id,numero,titulo,texto,sesion_id,sesiones_junta!inner(id,anio,nombre,tipo)")
+                .eq("sesiones_junta.anio", year)
+                .or_(f"titulo.ilike.%{term.strip()}%,texto.ilike.%{term.strip()}%,numero.ilike.%{term.strip()}%")
+                .execute().data or [])
+        if not rows:
+            st.info(f'No se encontraron acuerdos con “{term.strip()}” en {year}.')
+            return
+        for row in rows:
+            session = row.get("sesiones_junta") or {}
+            st.markdown(f'''<div class="session-card" style="--accent:var(--orange)"><h4>{html.escape(row.get("numero") or "Acuerdo")} · {html.escape(row.get("titulo") or "Sin título")}</h4>
+            <p>{html.escape(session.get("nombre") or "Sesión sin identificar")} · {html.escape(session.get("tipo") or "")}</p></div>''', unsafe_allow_html=True)
+            st.write(row.get("texto") or "Sin descripción")
+    except Exception as exc:
+        st.warning(f"El buscador estará disponible después de actualizar el esquema de Supabase: {exc}")
+
+
+def board_year_dashboard(year: int):
+    top1, top2 = st.columns([1, 5])
+    if top1.button("← Años", use_container_width=True):
+        st.session_state.pop("board_year", None)
+        st.session_state.pop("board_session", None)
+        st.rerun()
+    top2.markdown(f"## Junta de Gobierno · {year}")
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
+    term = st.text_input("Buscar acuerdos por palabra clave", placeholder="Ej. convenio, presupuesto, inmueble, municipio…", key=f"board_search_{year}")
+    board_search(client, year, term)
+    sessions = {"Ordinaria": [], "Extraordinaria": []}
+    if configured():
+        try:
+            rows = client.table("sesiones_junta").select("id,anio,tipo,nombre").eq("anio", year).order("created_at").execute().data or []
+            for row in rows:
+                sessions.setdefault(row.get("tipo"), []).append(row)
+        except Exception as exc:
+            st.warning(f"Ejecuta el esquema actualizado de Supabase para guardar sesiones: {exc}")
+    if year in (2025, 2026) and not any(sessions.values()):
+        for session_type in sessions:
+            sessions[session_type] = [{"id": f"preset-{year}-{session_type}-{index}", "anio": year,
+                                       "tipo": session_type, "nombre": name}
+                                      for index, name in enumerate(PRESET_BOARD_SESSIONS, 1)]
+
+    ordinary_col, extraordinary_col = st.columns(2, gap="large")
+    for column, session_type, accent in [(ordinary_col, "Ordinaria", "var(--blue)"),
+                                          (extraordinary_col, "Extraordinaria", "var(--purple)")]:
+        with column:
+            st.markdown(f'<div class="session-column"><h3>Sesiones {session_type.lower()}s</h3></div>', unsafe_allow_html=True)
+            for index, session in enumerate(sessions.get(session_type, [])):
+                st.markdown(f'<div class="session-card" style="--accent:{accent}"><h4>{html.escape(session["nombre"])}</h4><p>Sesión {session_type.lower()}</p></div>', unsafe_allow_html=True)
+                if st.button(f'Abrir {session["nombre"]}', key=f'open_board_{session_type}_{session["id"]}', use_container_width=True):
+                    st.session_state.board_session = session
+                    st.rerun()
+            if year >= 2027:
+                with st.expander(f"＋ Agregar sesión {session_type.lower()}"):
+                    with st.form(f"new_board_{year}_{session_type}"):
+                        session_name = st.text_input("Nombre de la sesión", placeholder="Ej. Primera sesión ordinaria")
+                        add_session = st.form_submit_button("Agregar sesión", type="primary", use_container_width=True)
+                    if add_session:
+                        if not session_name.strip():
+                            st.error("Escribe el nombre de la sesión.")
+                        elif not configured():
+                            st.error("Primero debes conectar Supabase.")
+                        else:
+                            try:
+                                client.table("sesiones_junta").insert({"anio": year, "tipo": session_type,
+                                    "nombre": session_name.strip(), "creado_por": st.session_state.user["id"]}).execute()
+                                st.success("Sesión agregada.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"No fue posible agregar la sesión: {exc}")
+
+
+def board_government():
+    if st.session_state.get("board_session"):
+        board_session_stub(st.session_state.board_session)
+    elif st.session_state.get("board_year"):
+        board_year_dashboard(int(st.session_state.board_year))
+    else:
+        board_year_selector()
+
+
 def programs():
     direction = st.session_state.get("program_direction")
     action = st.session_state.get("program_action")
@@ -886,6 +1009,8 @@ else:
             st.rerun()
         if st.button("Junta de Gobierno", use_container_width=True):
             st.session_state.page = "Junta de Gobierno"
+            st.session_state.pop("board_year", None)
+            st.session_state.pop("board_session", None)
             st.rerun()
         if st.button("Comités", use_container_width=True):
             st.session_state.page = "Comités"
@@ -901,5 +1026,6 @@ else:
     page = st.session_state.get("page", "Inicio")
     if page == "Inicio": landing()
     elif page == "Programas / Proyectos": programs()
+    elif page == "Junta de Gobierno": board_government()
     elif page == "Gestión de usuarios": user_management()
     else: placeholder(page)
