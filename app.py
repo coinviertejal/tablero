@@ -4,9 +4,10 @@ from datetime import datetime
 import base64
 import html
 from pathlib import Path
+import uuid
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from data import MUNICIPIOS_JALISCO
 from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
@@ -243,213 +244,90 @@ def execution_goal_fields(existing=None):
     return goals, evidence_groups, add_goal, remove_goal
 
 
-
-def risk_level(probability: int, impact: int):
-    score = int(probability or 0) * int(impact or 0)
-    if score >= 17:
-        return score, "Crítico"
-    if score >= 10:
-        return score, "Alto"
-    if score >= 5:
-        return score, "Moderado"
-    return score, "Bajo"
+RISK_COLUMNS = ["id", "riesgo", "categoria", "descripcion", "causa", "consecuencia",
+                "probabilidad", "impacto", "mitigacion", "responsable", "fecha_compromiso",
+                "estatus", "observaciones", "puntaje", "nivel", "eliminar"]
 
 
-def risk_summary_text(risks: list[dict]) -> str:
-    active = [r for r in risks if str(r.get("riesgo", "")).strip()]
-    if not active:
-        return "No se han identificado riesgos en la matriz del proyecto."
-
-    counts = {"Crítico": 0, "Alto": 0, "Moderado": 0, "Bajo": 0}
-    materialized = 0
-    mitigated = 0
-    overdue = 0
-    today = datetime.now().date()
-    enriched = []
-
-    for risk in active:
-        probability = int(risk.get("probabilidad", 1) or 1)
-        impact = int(risk.get("impacto", 1) or 1)
-        score, level = risk_level(probability, impact)
-        counts[level] += 1
-
-        status = risk.get("estatus", "Identificado")
-        if status == "Materializado":
-            materialized += 1
-        if status in ["Mitigado", "Cerrado"]:
-            mitigated += 1
-
-        due = str(risk.get("fecha_compromiso", "") or "").strip()
-        if due and status not in ["Mitigado", "Cerrado"]:
-            try:
-                if pd.to_datetime(due).date() < today:
-                    overdue += 1
-            except Exception:
-                pass
-
-        enriched.append((score, level, risk))
-
-    enriched.sort(key=lambda item: item[0], reverse=True)
-
-    top_text = "; ".join(
-        f"{item[2].get('riesgo', 'Sin nombre')} ({item[1].lower()}, {item[0]}/25)"
-        for item in enriched[:3]
-    )
-
-    categories = {}
-    for _, _, risk in enriched:
-        category = risk.get("categoria", "Otro") or "Otro"
-        categories[category] = categories.get(category, 0) + 1
-
-    main_categories = ", ".join(
-        name for name, _ in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:3]
-    )
-
-    return (
-        f"El proyecto registra {len(active)} riesgo(s): "
-        f"{counts['Crítico']} crítico(s), {counts['Alto']} alto(s), "
-        f"{counts['Moderado']} moderado(s) y {counts['Bajo']} bajo(s). "
-        f"Los riesgos de mayor prioridad son: {top_text}. "
-        f"Las principales categorías de exposición son {main_categories or 'sin categoría definida'}. "
-        f"Actualmente hay {materialized} riesgo(s) materializado(s), "
-        f"{mitigated} mitigado(s) o cerrado(s)"
-        + (f" y {overdue} con fecha compromiso vencida." if overdue else ".")
-    )
+def risk_level(score: int) -> str:
+    if score <= 4: return "Bajo"
+    if score <= 9: return "Moderado"
+    if score <= 16: return "Alto"
+    return "Crítico"
 
 
-def risk_matrix_editor(existing=None):
-    existing = existing or []
-
-    categories = [
-        "Financiero", "Jurídico", "Técnico", "Operativo", "Ambiental",
-        "Social", "Administrativo", "Cronograma",
-        "Proveedor / Contratista", "Otro"
-    ]
-    statuses = [
-        "Identificado", "En atención", "Mitigado",
-        "Materializado", "Cerrado"
-    ]
-
-    rows = []
-    for risk in existing:
-        probability = int(risk.get("probabilidad", 1) or 1)
-        impact = int(risk.get("impacto", 1) or 1)
-        score, level = risk_level(probability, impact)
-
-        rows.append({
-            "Riesgo identificado": risk.get("riesgo", ""),
-            "Categoría": risk.get("categoria", "Otro"),
-            "Descripción": risk.get("descripcion", ""),
-            "Causa": risk.get("causa", ""),
-            "Consecuencia / impacto esperado": risk.get("consecuencia", ""),
-            "Probabilidad": probability,
-            "Impacto": impact,
-            "Medida de mitigación / control": risk.get("mitigacion", ""),
-            "Responsable": risk.get("responsable", ""),
-            "Fecha compromiso": risk.get("fecha_compromiso", ""),
-            "Estatus": risk.get("estatus", "Identificado"),
-            "Observaciones / seguimiento": risk.get("observaciones", ""),
-            "Puntaje": score,
-            "Nivel": level,
-        })
-
-    if not rows:
-        rows = [{
-            "Riesgo identificado": "",
-            "Categoría": "Otro",
-            "Descripción": "",
-            "Causa": "",
-            "Consecuencia / impacto esperado": "",
-            "Probabilidad": 1,
-            "Impacto": 1,
-            "Medida de mitigación / control": "",
-            "Responsable": "",
-            "Fecha compromiso": "",
-            "Estatus": "Identificado",
-            "Observaciones / seguimiento": "",
-            "Puntaje": 1,
-            "Nivel": "Bajo",
-        }]
-
-    edited = st.data_editor(
-        pd.DataFrame(rows),
-        hide_index=True,
-        use_container_width=True,
-        num_rows="dynamic",
-        key="risk_matrix_editor",
-        column_config={
-            "Riesgo identificado": st.column_config.TextColumn(required=True, width="large"),
-            "Categoría": st.column_config.SelectboxColumn(options=categories, required=True),
-            "Descripción": st.column_config.TextColumn(width="large"),
-            "Causa": st.column_config.TextColumn(width="large"),
-            "Consecuencia / impacto esperado": st.column_config.TextColumn(width="large"),
-            "Probabilidad": st.column_config.NumberColumn(min_value=1, max_value=5, step=1, required=True),
-            "Impacto": st.column_config.NumberColumn(min_value=1, max_value=5, step=1, required=True),
-            "Medida de mitigación / control": st.column_config.TextColumn(width="large"),
-            "Responsable": st.column_config.TextColumn(),
-            "Fecha compromiso": st.column_config.TextColumn(help="Formato sugerido: AAAA-MM-DD"),
-            "Estatus": st.column_config.SelectboxColumn(options=statuses, required=True),
-            "Observaciones / seguimiento": st.column_config.TextColumn(width="large"),
-            "Puntaje": st.column_config.NumberColumn(disabled=True),
-            "Nivel": st.column_config.TextColumn(disabled=True),
-        },
-    )
-
-    risks = []
-    for _, row in edited.iterrows():
-        risk_name = str(row.get("Riesgo identificado", "") or "").strip()
-        if not risk_name:
+def normalize_risks(records) -> list[dict]:
+    clean = []
+    for raw in records or []:
+        item = dict(raw)
+        if item.get("eliminar") is True:
             continue
+        name = str(item.get("riesgo") or "").strip()
+        if not name:
+            continue
+        try:
+            probability = max(1, min(5, int(float(item.get("probabilidad") or 1))))
+            impact = max(1, min(5, int(float(item.get("impacto") or 1))))
+        except (TypeError, ValueError):
+            probability, impact = 1, 1
+        score = probability * impact
+        clean.append({"id": str(item.get("id") or uuid.uuid4()), "riesgo": name,
+            "categoria": str(item.get("categoria") or "Otro").strip(),
+            "descripcion": str(item.get("descripcion") or "").strip(),
+            "causa": str(item.get("causa") or "").strip(),
+            "consecuencia": str(item.get("consecuencia") or "").strip(),
+            "probabilidad": probability, "impacto": impact,
+            "mitigacion": str(item.get("mitigacion") or "").strip(),
+            "responsable": str(item.get("responsable") or "").strip(),
+            "fecha_compromiso": str(item.get("fecha_compromiso") or "").strip(),
+            "estatus": str(item.get("estatus") or "Por iniciar").strip(),
+            "observaciones": str(item.get("observaciones") or "").strip(),
+            "puntaje": score, "nivel": risk_level(score), "eliminar": False})
+    return clean
 
-        probability = int(row.get("Probabilidad", 1) or 1)
-        impact = int(row.get("Impacto", 1) or 1)
-        score, level = risk_level(probability, impact)
 
-        risks.append({
-            "riesgo": risk_name,
-            "categoria": str(row.get("Categoría", "Otro") or "Otro"),
-            "descripcion": str(row.get("Descripción", "") or "").strip(),
-            "causa": str(row.get("Causa", "") or "").strip(),
-            "consecuencia": str(row.get("Consecuencia / impacto esperado", "") or "").strip(),
-            "probabilidad": probability,
-            "impacto": impact,
-            "puntaje": score,
-            "nivel": level,
-            "mitigacion": str(row.get("Medida de mitigación / control", "") or "").strip(),
-            "responsable": str(row.get("Responsable", "") or "").strip(),
-            "fecha_compromiso": str(row.get("Fecha compromiso", "") or "").strip(),
-            "estatus": str(row.get("Estatus", "Identificado") or "Identificado"),
-            "observaciones": str(row.get("Observaciones / seguimiento", "") or "").strip(),
-        })
+def risks_from_excel(uploaded_file) -> list[dict]:
+    frame = pd.read_excel(uploaded_file, sheet_name="Matriz de riesgos", header=3)
+    aliases = {"ID (no modificar)": "id", "Riesgo": "riesgo", "Categoría": "categoria",
+        "Descripción": "descripcion", "Causa": "causa", "Consecuencia": "consecuencia",
+        "Probabilidad (1-5)": "probabilidad", "Impacto (1-5)": "impacto",
+        "Mitigación": "mitigacion", "Responsable": "responsable",
+        "Fecha compromiso": "fecha_compromiso", "Estatus": "estatus", "Observaciones": "observaciones"}
+    missing = [column for column in aliases if column not in frame.columns]
+    if missing:
+        raise ValueError("Faltan columnas de la plantilla: " + ", ".join(missing))
+    frame = frame.rename(columns=aliases)[list(aliases.values())].where(pd.notna(frame), "")
+    return normalize_risks(frame.to_dict("records"))
 
-    counts = {
-        level: sum(risk["nivel"] == level for risk in risks)
-        for level in ["Crítico", "Alto", "Moderado", "Bajo"]
-    }
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Críticos", counts["Crítico"])
-    c2.metric("Altos", counts["Alto"])
-    c3.metric("Moderados", counts["Moderado"])
-    c4.metric("Bajos", counts["Bajo"])
-
-    synthesis = risk_summary_text(risks)
-    st.markdown("### Síntesis de riesgos")
-    st.info(synthesis)
-    st.caption("La síntesis se genera automáticamente a partir de la matriz capturada.")
-
-    return risks, synthesis
+def risk_summary(risks: list[dict]) -> str:
+    if not risks:
+        return "Todavía no se han registrado riesgos."
+    counts = {level: sum(1 for risk in risks if risk["nivel"] == level)
+              for level in ["Bajo", "Moderado", "Alto", "Crítico"]}
+    priority = sorted(risks, key=lambda risk: risk["puntaje"], reverse=True)[:3]
+    main = ", ".join(f'{risk["riesgo"]} ({risk["puntaje"]}, {risk["nivel"]})' for risk in priority)
+    materialized = sum(1 for risk in risks if risk["estatus"] == "Materializado")
+    closed = sum(1 for risk in risks if risk["estatus"] == "Mitigado / cerrado")
+    return (f'Riesgos: {len(risks)} · Críticos: {counts["Crítico"]} · Altos: {counts["Alto"]} · '
+            f'Moderados: {counts["Moderado"]} · Bajos: {counts["Bajo"]}. Materializados: {materialized}; '
+            f'mitigados/cerrados: {closed}. Principales: {main}.')
 
 
 def project_form(direction: str, project=None):
     project = project or {}
+    risk_context = str(project.get("id") or "new")
+    if st.session_state.get("risk_context") != risk_context:
+        st.session_state.risk_context = risk_context
+        saved_risks = ((project.get("avance_proyecto") or {}).get("matriz_riesgos") or [])
+        st.session_state.risk_rows = normalize_risks(saved_risks)
     st.subheader("Editar proyecto" if project else "Dar de alta nuevo proyecto")
     with st.form("project_form", clear_on_submit=False):
         is_projects = direction == "Dirección de Proyectos"
         if is_projects:
-            general_tab, advance_tab, risk_tab = st.tabs(["Ficha general", "Avance", "Matriz de riesgos"])
+            general_tab, advance_tab, risks_tab = st.tabs(["Ficha general", "Avance", "Matriz de riesgos"])
         else:
-            general_tab, advance_tab, risk_tab = st.container(), None, None
+            general_tab, advance_tab, risks_tab = st.container(), None, None
 
         with general_tab:
             st.markdown("### Información General")
@@ -495,7 +373,6 @@ def project_form(direction: str, project=None):
 
         execution_goals, goal_evidence_groups, add_goal, remove_goal = [], [], False, False
         budget_dispersed = 0.0
-        risks, risk_synthesis = [], ""
         if is_projects:
             with advance_tab:
                 saved_advance = project.get("avance_proyecto", {}) or {}
@@ -519,14 +396,40 @@ def project_form(direction: str, project=None):
                 </div>''', unsafe_allow_html=True)
                 refresh_metrics = st.form_submit_button("Actualizar indicadores", use_container_width=True)
 
-            with risk_tab:
-                saved_advance = project.get("avance_proyecto", {}) or {}
-                st.markdown("### Matriz de riesgos del proyecto")
-                st.caption("Probabilidad e impacto se califican de 1 (muy bajo) a 5 (muy alto). El nivel se calcula como Probabilidad × Impacto.")
-                risks, risk_synthesis = risk_matrix_editor(saved_advance.get("matriz_riesgos", []) or [])
+            with risks_tab:
+                st.markdown("### Matriz de riesgos")
+                st.caption("Edita la tabla. Para borrar un riesgo, marca Eliminar o usa el control de eliminación de filas.")
+                template_path = Path("plantilla_matriz_riesgos_coinvierte.xlsx")
+                if template_path.exists():
+                    template_b64 = base64.b64encode(template_path.read_bytes()).decode()
+                    st.markdown(f'<a download="plantilla_matriz_riesgos_coinvierte.xlsx" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{template_b64}">⬇️ Descargar plantilla Excel</a>', unsafe_allow_html=True)
+                risk_file = st.file_uploader("Cargar plantilla llena (.xlsx)", type=["xlsx"], key=f"risk_excel_{risk_context}")
+                import_risks = st.form_submit_button("Ingestar riesgos desde Excel", use_container_width=True)
+                risk_frame = pd.DataFrame(st.session_state.get("risk_rows", []), columns=RISK_COLUMNS)
+                edited_risks = st.data_editor(risk_frame, key=f"risk_editor_{risk_context}", num_rows="dynamic",
+                    use_container_width=True, hide_index=True, disabled=["id", "puntaje", "nivel"],
+                    column_config={"id": None,
+                        "riesgo": st.column_config.TextColumn("Riesgo", required=True, width="medium"),
+                        "categoria": st.column_config.SelectboxColumn("Categoría", options=["Financiero", "Operativo", "Jurídico / normativo", "Técnico", "Ambiental", "Social", "Reputacional", "Cronograma", "Otro"], width="medium"),
+                        "descripcion": st.column_config.TextColumn("Descripción", width="large"),
+                        "causa": st.column_config.TextColumn("Causa", width="large"),
+                        "consecuencia": st.column_config.TextColumn("Consecuencia", width="large"),
+                        "probabilidad": st.column_config.NumberColumn("Probabilidad 1–5", min_value=1, max_value=5, step=1, required=True),
+                        "impacto": st.column_config.NumberColumn("Impacto 1–5", min_value=1, max_value=5, step=1, required=True),
+                        "mitigacion": st.column_config.TextColumn("Mitigación", width="large"),
+                        "responsable": st.column_config.TextColumn("Responsable", width="medium"),
+                        "fecha_compromiso": st.column_config.TextColumn("Fecha compromiso", help="Formato sugerido: AAAA-MM-DD"),
+                        "estatus": st.column_config.SelectboxColumn("Estatus", options=["Por iniciar", "En seguimiento", "Materializado", "Mitigado / cerrado"], width="medium"),
+                        "observaciones": st.column_config.TextColumn("Observaciones", width="large"),
+                        "puntaje": st.column_config.NumberColumn("Puntaje", help="Probabilidad × Impacto"),
+                        "nivel": st.column_config.TextColumn("Nivel"),
+                        "eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca para borrar al guardar.")})
+                recalculate_risks = st.form_submit_button("Actualizar puntajes y síntesis", use_container_width=True)
+                current_risks = normalize_risks(edited_risks.to_dict("records"))
+                st.info(risk_summary(current_risks))
         else:
             budget_pct, physical_pct, traffic, completed = 0, float(progress), current_status, 0
-            refresh_metrics = False
+            refresh_metrics, import_risks, recalculate_risks, risk_file, edited_risks = False, False, False, None, None
 
         st.markdown("### Ficha del proyecto")
         st.caption("La ficha incluye información general, monitoreo y evidencia fotográfica. Gestión Documental no se muestra.")
@@ -541,6 +444,19 @@ def project_form(direction: str, project=None):
         st.session_state.execution_goal_count -= 1
         st.rerun()
     if refresh_metrics:
+        st.rerun()
+    if import_risks:
+        if risk_file is None:
+            st.error("Selecciona primero el archivo Excel lleno.")
+        else:
+            try:
+                st.session_state.risk_rows = risks_from_excel(risk_file)
+                st.success(f"Se importaron {len(st.session_state.risk_rows)} riesgos.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No fue posible importar la plantilla: {exc}")
+    if recalculate_risks:
+        st.session_state.risk_rows = normalize_risks(edited_risks.to_dict("records"))
         st.rerun()
 
     if save or preview:
@@ -559,10 +475,12 @@ def project_form(direction: str, project=None):
                 st.error(error)
             return
         if is_projects:
+            risk_rows = normalize_risks(edited_risks.to_dict("records"))
+            st.session_state.risk_rows = risk_rows
             advance_data = {"presupuesto_dispersado": budget_dispersed, "porcentaje_financiero": round(budget_pct, 2),
                             "porcentaje_fisico": round(physical_pct, 2), "semaforo": traffic,
                             "metas_terminadas": completed, "metas": execution_goals,
-                            "matriz_riesgos": risks, "sintesis_riesgos": risk_synthesis}
+                            "matriz_riesgos": risk_rows, "sintesis_riesgos": risk_summary(risk_rows)}
             monitoring_data = {"estatus": traffic, "responsable": "", "periodo": "", "avance": round(physical_pct),
                                "avances": f"{completed} de {len(execution_goals)} metas terminadas. Avance financiero: {budget_pct:.1f}%.",
                                "pendientes": "", "proximas_acciones": "", "observaciones": ""}
@@ -687,7 +605,7 @@ def render_readonly_project(project: dict, photos: list[bytes]):
     tab_labels = ["Ficha general", "Avance", "Matriz de riesgos"] if is_projects else ["Ficha general", "Monitoreo y seguimiento"]
     tabs = st.tabs(tab_labels)
     general_tab, progress_tab = tabs[0], tabs[1]
-    risk_tab = tabs[2] if is_projects else None
+    risks_tab = tabs[2] if is_projects else None
     with general_tab:
         st.markdown("### Información General")
         c1, c2, c3 = st.columns(3)
@@ -735,35 +653,16 @@ def render_readonly_project(project: dict, photos: list[bytes]):
                                ("Próximas acciones","proximas_acciones"),("Observaciones","observaciones")]:
                 st.markdown(f"**{label}:** {monitoring.get(key) or 'Sin información'}")
 
-    if is_projects and risk_tab is not None:
-        with risk_tab:
-            advance = project.get("avance_proyecto", {}) or {}
-            risks = advance.get("matriz_riesgos", []) or []
-            synthesis = advance.get("sintesis_riesgos") or risk_summary_text(risks)
-
-            st.markdown("### Matriz de riesgos")
-            if not risks:
-                st.info("Todavía no se han registrado riesgos para este proyecto.")
-            else:
-                rows = []
-                for risk in risks:
-                    score, level = risk_level(risk.get("probabilidad", 1), risk.get("impacto", 1))
-                    rows.append({
-                        "Riesgo": risk.get("riesgo", ""),
-                        "Categoría": risk.get("categoria", ""),
-                        "Probabilidad": risk.get("probabilidad", 1),
-                        "Impacto": risk.get("impacto", 1),
-                        "Puntaje": score,
-                        "Nivel": level,
-                        "Estatus": risk.get("estatus", ""),
-                        "Responsable": risk.get("responsable", ""),
-                        "Fecha compromiso": risk.get("fecha_compromiso", ""),
-                        "Mitigación / control": risk.get("mitigacion", ""),
-                    })
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
+    if risks_tab:
+        with risks_tab:
+            risks = normalize_risks((project.get("avance_proyecto") or {}).get("matriz_riesgos", []))
             st.markdown("### Síntesis de riesgos")
-            st.info(synthesis)
+            st.info(risk_summary(risks))
+            if risks:
+                display = pd.DataFrame(risks).drop(columns=["id", "eliminar"], errors="ignore")
+                st.dataframe(display, use_container_width=True, hide_index=True)
+            else:
+                st.info("Todavía no se han registrado riesgos.")
 
     pdf = build_pdf(project, photos, "assets/logo_coinvierte.jpeg")
     docx = build_docx(project, photos, "assets/logo_coinvierte.jpeg")
