@@ -1,767 +1,253 @@
-from __future__ import annotations
-
-from datetime import datetime
-import base64
-import html
 from pathlib import Path
+from io import BytesIO
+import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, streamlit as st
+from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
+from src.storage import client,fetch,insert_one,insert_rows
+ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
+APP_VERSION='2026.08.14-presupuesto-v2-graficas-individuales'
+st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
+PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
+st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
+def authenticate():
+    expected=st.secrets.get('APP_PASSWORD','')
+    if not expected:st.error('Falta configurar APP_PASSWORD.');st.stop()
+    if st.session_state.get('authenticated'):return
+    _,col,_=st.columns([1,1.1,1])
+    with col:
+        st.markdown('<div style="height:12vh"></div>',unsafe_allow_html=True);st.title('Presupuesto Familiar')
+        with st.form('login'):pwd=st.text_input('Contraseña',type='password');sent=st.form_submit_button('Entrar',use_container_width=True,type='primary')
+        if sent:
+            if hmac.compare_digest(pwd,expected):st.session_state.authenticated=True;st.rerun()
+            st.error('Contraseña incorrecta')
+    st.stop()
+@st.cache_data
+def budget_data():return load_budget(str(DATA/'ppto_2026_morus.xlsx'))
+@st.cache_data
+def budget_template():
+    sample=pd.DataFrame({'Categoría':['Hogar','Salud','Transporte','Compras personales','Ciencias'],'Monto':[35000,12000,9000,6000,10000]});buffer=BytesIO()
+    with pd.ExcelWriter(buffer,engine='openpyxl') as writer:sample.to_excel(writer,index=False,sheet_name='Presupuesto mensual')
+    return buffer.getvalue()
+@st.cache_data
+def extraordinary_data():return load_extraordinary(str(DATA/'gastos_no_programados.xlsx'))
+def initial_movements():
+    p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
+def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
+def money(v):return f'${v:,.2f}' if abs(v-round(v))>.001 else f'${v:,.0f}'
+def change_color(v):
+    try:n=float(str(v).replace('$','').replace(',',''))
+    except (TypeError,ValueError):return ''
+    return 'color:#15803D;font-weight:700' if n>0 else ('color:#DC2626;font-weight:700' if n<0 else '')
+def style(fig):
+    fig.update_layout(font=dict(color=NAVY),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',margin=dict(l=10,r=10,t=52,b=10),legend_title_text='');fig.update_xaxes(gridcolor=GRID);fig.update_yaxes(gridcolor=GRID);return fig
+def db_movements():
+    rows=fetch('movements');df=pd.DataFrame(rows) if rows else initial_movements()
+    if not df.empty:df['movement_date']=pd.to_datetime(df.movement_date);df['amount']=pd.to_numeric(df.amount)
+    return df
+def analytical_monthly():
+    base=compiled_data().copy();mov=db_movements()
+    if not mov.empty:
+        mov['subcategory']=mov.get('subcategory','Sin detalle').fillna('').replace('','Sin detalle');tx=mov.assign(year=mov.movement_date.dt.year,month=mov.movement_date.dt.month,month_name=mov.movement_date.dt.month.map(MONTHS)).groupby(['year','month','month_name','category','subcategory'],as_index=False).amount.sum();tx['source']='Alzex';keys=set(zip(tx.year,tx.month));base=base[~base[['year','month']].apply(tuple,axis=1).isin(keys)];base=pd.concat([base,tx],ignore_index=True)
+    return base
+def period_filter(df,key):
+    years=sorted(df.year.unique(),reverse=True);c1,c2=st.columns([1,3]);year=c1.selectbox('Año',years,key='y'+key);available=sorted(df.loc[df.year==year,'month'].unique());names=[MONTHS[m] for m in available];chosen=c2.multiselect('Meses a analizar',names,default=names,key='months'+key);selected=sorted(MONTH_NUM[m] for m in chosen)
+    if not selected:st.info('Selecciona al menos un mes.');st.stop()
+    scoped=df[(df.year==year)&(df.month.isin(selected))].copy();categories=sorted(scoped.category.dropna().unique());chosen_cat=st.multiselect('Categorías (opcional)',categories,key='cats'+key,placeholder='Todas las categorías')
+    if chosen_cat:scoped=scoped[scoped.category.isin(chosen_cat)]
+    subcats=sorted(scoped.subcategory.fillna('Sin detalle').unique());chosen_sub=st.multiselect('Subcategorías (opcional)',subcats,key='subs'+key,placeholder='Todas las subcategorías')
+    if chosen_sub:
+        scoped=scoped[scoped.subcategory.fillna('Sin detalle').isin(chosen_sub)];present=set(scoped.month.unique());missing=[MONTHS[m] for m in selected if m not in present]
+        if missing:st.caption('Sin movimientos para este filtro: '+', '.join(missing)+'. Se mostrarán con valor $0 en la gráfica mensual.')
+    label=f"{', '.join(chosen)} {year}" if len(chosen)<=3 else f'{len(chosen)} meses de {year}'
+    return scoped,selected,label,year
 
-import streamlit as st
+def extraordinary_all():
+    base=extraordinary_data().copy();base['month']=base.month.astype(str).str.strip().str.title();base['month_num']=base.month.map(MONTH_NUM);base['year']=2026;rows=fetch('extraordinary_expenses')
+    if rows:
+        saved=pd.DataFrame(rows);saved['expense_date']=pd.to_datetime(saved.expense_date);saved=saved.assign(month=saved.expense_date.dt.month.map(MONTHS),month_num=saved.expense_date.dt.month,year=saved.expense_date.dt.year).rename(columns={'concept':'concept','amount':'amount'});base=pd.concat([base[['month','concept','amount','month_num','year']],saved[['month','concept','amount','month_num','year']]],ignore_index=True)
+    base['amount']=pd.to_numeric(base.amount,errors='coerce').fillna(0);return base
 
-from data import MUNICIPIOS_JALISCO
-from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
-from exports import build_docx, build_pdf
+def horizontal_month_chart(view,title):
+    data=view.groupby(['category','month','month_name'],as_index=False).amount.sum();order=data.groupby('category').amount.sum().sort_values(ascending=False).head(12);data=data[data.category.isin(order.index)];fig=px.bar(data,x='amount',y='category',color='month_name',orientation='h',barmode='stack',title=title,category_orders={'category':list(reversed(order.index)),'month_name':[MONTHS[m] for m in sorted(data.month.unique())]},color_discrete_sequence=MONTH_COLORS,labels={'amount':'Gasto','category':'Categoría','month_name':'Mes'});fig.update_xaxes(tickprefix='$',tickformat=',.0f');totals=data.groupby('category',as_index=False).amount.sum();fig.add_scatter(x=totals.amount,y=totals.category,mode='text',text=[money(v) for v in totals.amount],textposition='middle right',showlegend=False,hoverinfo='skip');fig=style(fig);fig.update_layout(margin=dict(l=10,r=95,t=52,b=10));return fig
 
-st.set_page_config(page_title="COINVIERTE | Gestión Institucional", page_icon="🏛️", layout="wide")
+def vertical_composition(view,y_step=None):
+    data=view.groupby(['category','month','month_name'],as_index=False).amount.sum();order=data.groupby('category').amount.sum().sort_values(ascending=False).index;data=data[data.category.isin(order)];fig=px.bar(data,x='category',y='amount',color='month_name',barmode='group',title='Composición del gasto por mes',category_orders={'category':list(order),'month_name':[MONTHS[m] for m in sorted(data.month.unique())]},color_discrete_sequence=MONTH_COLORS,labels={'amount':'Gasto','category':'Categoría','month_name':'Mes'});fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_xaxes(tickangle=-35);return style(fig)
 
-st.markdown("""
-<style>
-:root { --ink:#35434b; --gray:#858e93; --blue:#0798cf; --green:#009b4c; --teal:#16ad8f; --purple:#a990c7; --orange:#f68b08; --paper:#f6f8f9; }
-.stApp { background:linear-gradient(180deg,#fbfcfc 0%,#f1f5f6 100%); color:var(--ink); }
-.block-container { max-width:1480px; padding-top:2.1rem; padding-bottom:4rem; }
-[data-testid="stSidebar"] { background:linear-gradient(180deg,#535f66 0%,#778187 100%); border-right:0; }
-[data-testid="stSidebar"] * { color:white; }
-[data-testid="stSidebar"] hr { border-color:rgba(255,255,255,.22); }
-[data-testid="stSidebar"] .stButton button { background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.22); color:white; text-align:left; padding:.68rem .85rem; border-radius:10px; }
-[data-testid="stSidebar"] .stButton button:hover { background:var(--blue); border-color:#fff; }
-.brand { display:flex; align-items:center; gap:13px; }
-.brand-mark { width:44px; height:44px; flex:0 0 44px; }
-.brand-name { font-size:1.32rem; font-weight:800; letter-spacing:.055em; line-height:1; }
-.brand-sub { font-size:.67rem; letter-spacing:.08em; opacity:.72; margin-top:5px; text-transform:uppercase; }
-.side-logo { background:#fff; border-radius:13px; padding:12px 10px; margin:.3rem 0 1.35rem; box-shadow:0 8px 20px rgba(0,0,0,.12); }
-.side-logo img { display:block; width:100%; height:auto; }
-.hero { position:relative; overflow:hidden; background:#fff; padding:2.25rem 2.55rem 1.65rem; border-radius:22px; margin-bottom:1.2rem; border:1px solid #e1e7e9; border-bottom:7px solid var(--orange); box-shadow:0 18px 42px rgba(53,67,75,.11); }
-.hero:after { content:""; position:absolute; width:260px; height:260px; border:42px solid rgba(7,152,207,.06); border-radius:50%; right:-120px; top:-125px; box-shadow:0 0 0 38px rgba(0,155,76,.035); }
-.hero-logo { display:block; width:min(760px,78%); max-height:145px; object-fit:contain; object-position:left center; position:relative; z-index:1; }
-.hero-copy { max-width:820px; font-size:1.02rem; color:#667279; margin:1.25rem 0 0; line-height:1.55; position:relative; z-index:1; }
-.welcome { background:white; padding:.8rem 1rem; border-radius:11px; border:1px solid #e5ebee; margin:.4rem 0 1.2rem; color:#52616d; font-size:.9rem; }
-.card { background:rgba(255,255,255,.97); border:1px solid #dfe7e9; border-top:5px solid var(--accent,var(--blue)); border-radius:17px; padding:1.45rem; min-height:175px; box-shadow:0 8px 24px rgba(53,67,75,.06); transition:.2s ease; }
-.card:hover { transform:translateY(-3px); box-shadow:0 13px 30px rgba(53,67,75,.11); border-color:var(--accent,var(--blue)); }
-.card-blue { --accent:var(--blue); } .card-green { --accent:var(--green); } .card-purple { --accent:var(--purple); }
-.card-icon { display:inline-flex; align-items:center; justify-content:center; width:46px; height:46px; border-radius:13px; background:color-mix(in srgb,var(--accent,var(--blue)) 13%,white); color:var(--accent,var(--blue)); font-size:1.3rem; font-weight:800; margin-bottom:.65rem; }
-.card h3 { margin:.15rem 0 .65rem; color:var(--ink); font-size:1.25rem; }
-.muted { color:#647580; line-height:1.5; }
-.choice-card { background:#fff; border:1px solid #dfe7e9; border-top:7px solid var(--accent,var(--blue)); border-radius:20px; padding:2rem 1.8rem 1.65rem; min-height:205px; box-shadow:0 12px 32px rgba(53,67,75,.08); text-align:center; margin-top:.7rem; }
-.choice-card .choice-icon { width:68px; height:68px; border-radius:20px; display:flex; align-items:center; justify-content:center; margin:0 auto 1rem; background:color-mix(in srgb,var(--accent,var(--blue)) 14%,white); color:var(--accent,var(--blue)); font-size:1.6rem; font-weight:800; }
-.choice-card h3 { font-size:1.45rem; margin:.25rem 0 .7rem; }
-.choice-card p { color:#6d7980; margin:0; line-height:1.45; }
-.choice-operations { --accent:var(--blue); } .choice-projects { --accent:var(--green); }
-.choice-new { --accent:var(--orange); } .choice-edit { --accent:var(--purple); } .choice-view { --accent:var(--teal); }
-.choice-title { text-align:center; margin:.7rem 0 .25rem; }
-.choice-subtitle { text-align:center; color:#69767d; margin-bottom:1.2rem; }
-.metric-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:1rem 0 1.25rem; }
-.metric-box { background:#fff; border:1px solid #dfe7e9; border-radius:14px; padding:1rem; border-top:4px solid var(--metric,var(--blue)); }
-.metric-box .metric-label { color:#748087; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
-.metric-box .metric-value { color:var(--ink); font-size:1.55rem; font-weight:800; margin-top:.25rem; }
-.metric-blue{--metric:var(--blue)} .metric-green{--metric:var(--green)} .metric-orange{--metric:var(--orange)} .metric-purple{--metric:var(--purple)}
-.goal-heading { padding:.75rem 1rem; border-radius:10px; margin:1rem 0 .8rem; font-weight:800; border-left:8px solid var(--status-color); background:color-mix(in srgb,var(--status-color) 10%,white); }
-.status-red{--status-color:#d9534f}.status-yellow{--status-color:#f0ad00}.status-green{--status-color:#009b4c}.status-gray{--status-color:#858e93}
-@media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,1fr)}}
-div[data-testid="stForm"] { background:white; padding:1.55rem; border-radius:18px; border:1px solid #dfe7e9; box-shadow:0 8px 24px rgba(20,55,70,.045); }
-div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--orange); border-bottom:1px solid #e4ebed; padding:.15rem 0 .65rem .75rem; margin-top:1.2rem; }
-.stButton button, .stFormSubmitButton button { border-radius:10px; }
-.stFormSubmitButton button[kind="primary"] { background:linear-gradient(90deg,var(--green),var(--teal)); border:0; }
-.stFormSubmitButton button[kind="primary"]:hover { background:linear-gradient(90deg,var(--blue),var(--teal)); }
-div[data-baseweb="radio"] div[aria-checked="true"] { color:var(--orange); }
-div[data-baseweb="input"]:focus-within, div[data-baseweb="select"]:focus-within, div[data-baseweb="textarea"]:focus-within { border-color:var(--blue); box-shadow:0 0 0 1px var(--blue); }
-[data-testid="stFileUploaderDropzone"] { background:#f5faf9; border-color:var(--teal); }
-h1,h2,h3 { letter-spacing:-.018em; color:var(--ink); }
-</style>
-""", unsafe_allow_html=True)
-
-
-def logo_data_uri():
-    logo = Path("assets/logo_coinvierte.jpeg")
-    if not logo.exists():
-        return ""
-    return "data:image/jpeg;base64," + base64.b64encode(logo.read_bytes()).decode()
-
-
-def brand_html(sidebar=False):
-    src = logo_data_uri()
-    if src:
-        css_class = "side-logo" if sidebar else ""
-        return f'<div class="{css_class}"><img src="{src}" alt="COINVIERTE"></div>' if sidebar else f'<img class="hero-logo" src="{src}" alt="COINVIERTE">'
-    return '<div class="brand"><div><div class="brand-name">COINVIERTE</div><div class="brand-sub">Agencia de Coinversión para el Desarrollo Sostenible de Jalisco</div></div></div>'
-
-
-def logo_header():
-    identity = brand_html()
-    st.markdown(f'''<div class="hero">{identity}
-    <p class="hero-copy">Plataforma institucional para la gestión integral, documentación y seguimiento de programas y proyectos.</p></div>''', unsafe_allow_html=True)
-
-
-def login():
-    logo_header()
-    st.subheader("Acceso institucional")
-    if not configured():
-        st.warning("Modo demostración: falta configurar Supabase. Puedes ingresar con cualquier correo @jalisco.gob.mx.")
-    login_tab, activation_tab = st.tabs(["Ingresar", "Activar acceso con código"])
-    with login_tab:
-        with st.form("login"):
-            email = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
-            password = st.text_input("Contraseña", type="password")
-            submitted = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
-    with activation_tab:
-        st.caption("Utiliza el código temporal entregado por el administrador. El código sólo puede usarse una vez.")
-        with st.form("activate_access"):
-            activation_email = st.text_input("Correo autorizado", placeholder="nombre@jalisco.gob.mx", key="activation_email")
-            code = st.text_input("Código temporal", max_chars=8)
-            new_password = st.text_input("Crea una contraseña", type="password", key="new_password")
-            confirm_password = st.text_input("Confirma la contraseña", type="password")
-            activate = st.form_submit_button("Activar mi acceso", type="primary", use_container_width=True)
-    if activate:
-        if not configured():
-            st.error("Primero debes conectar Supabase.")
-        elif not valid_official_email(activation_email):
-            st.error("El correo debe pertenecer a @jalisco.gob.mx.")
-        elif len(new_password) < 8:
-            st.error("La contraseña debe tener al menos 8 caracteres.")
-        elif new_password != confirm_password:
-            st.error("Las contraseñas no coinciden.")
-        else:
+def all_categories_chart(view):
+    data=view.groupby('category',as_index=False).amount.sum().sort_values('amount');fig=px.bar(data,x='amount',y='category',orientation='h',title='Gasto total por todas las categorías',text=[money(v) for v in data.amount],color='amount',color_continuous_scale=['#BFDBFE','#2563EB'],labels={'amount':'Gasto','category':'Categoría'});fig.update_xaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(textposition='outside');fig.update_layout(coloraxis_showscale=False,margin=dict(l=10,r=90,t=52,b=10),height=max(450,36*len(data)));return style(fig)
+authenticate()
+with st.sidebar:
+    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
+    with st.expander('Cargar presupuesto mensual'):
+        st.download_button('Descargar plantilla Excel',budget_template(),file_name='plantilla_presupuesto_mensual.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
+        upload_key=st.session_state.get('budget_upload_key',0);budget_file=st.file_uploader('Excel con Categoría y Monto',type=['xlsx'],key=f'budget_file_{upload_key}')
+        if budget_file:
             try:
-                auth = public_client().auth.sign_up({"email": activation_email.lower().strip(), "password": new_password})
-                redeemed = public_client().rpc("canjear_codigo_acceso", {"p_email": activation_email.lower().strip(),
-                                                                          "p_codigo": code.strip()}).execute().data
-                if not redeemed:
-                    st.error("El código es incorrecto, ya fue utilizado o está vencido.")
+                custom_budget=load_simple_budget(budget_file.getvalue());st.session_state['custom_budget']=custom_budget.to_dict('records');st.success(f'{len(custom_budget)} categorías cargadas.')
+            except Exception as e:st.error(str(e))
+        if st.session_state.get('custom_budget') and st.button('Restaurar presupuesto original',use_container_width=True):
+            st.session_state.pop('custom_budget',None);st.session_state['budget_upload_key']=upload_key+1;st.rerun()
+        if st.session_state.get('custom_budget'):st.caption('Fuente activa: archivo cargado')
+        else:st.caption('Fuente activa: presupuesto original')
+    st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
+    if st.button('Cerrar sesión',use_container_width=True):st.session_state.clear();st.rerun()
+monthly=analytical_monthly();budget=pd.DataFrame(st.session_state['custom_budget']) if st.session_state.get('custom_budget') else budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
+if page=='Resumen':
+    st.title('Resumen financiero');st.caption('Dónde estás parado, qué se está desviando y dónde hay fugas');view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
+    left,right=st.columns([1.35,1])
+    with left:
+        trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);fig=px.bar(trend,x='month_name',y='amount',title='Gasto mensual',text_auto=',.0f',color='month_name',color_discrete_sequence=MONTH_COLORS,labels={'month_name':'Mes','amount':'Gasto'});fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text=f'Presupuesto {money(monthly_budget)}');fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_layout(showlegend=False);st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+    with right:
+        st.plotly_chart(horizontal_month_chart(view,'Principales categorías por mes'),use_container_width=True,config=PLOT_CONFIG)
+elif page=='Tendencias y fugas':
+    st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG);st.plotly_chart(vertical_composition(view,y_step),use_container_width=True,config=PLOT_CONFIG);current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});st.plotly_chart(all_categories_chart(view),use_container_width=True,config=PLOT_CONFIG)
+elif page=='Presupuesto':
+    st.title('Presupuesto contra gasto real');st.caption('Comparación mensual o acumulada con categorías conciliadas');view,selected,label,year=period_filter(monthly,'bud');plan=budget.groupby('category').monthly_budget.sum()*len(selected);actual=view.groupby('category').amount.sum();comp=pd.concat([plan.rename('Presupuesto'),actual.rename('Real')],axis=1).fillna(0);comp['Variación']=comp.Real-comp.Presupuesto;comp['Ejercicio']=comp.Real/comp.Presupuesto.replace(0,pd.NA);comp=comp.reset_index().rename(columns={'category':'Categoría'}).sort_values('Variación',ascending=False);st.markdown('#### '+label);c1,c2,c3=st.columns(3);c1.metric('Presupuesto',money(comp.Presupuesto.sum()));c2.metric('Gasto real',money(comp.Real.sum()));c3.metric('Variación',money(comp.Variación.sum()),delta_color='inverse');display=comp.copy();display['Presupuesto']=display.Presupuesto.map(money);display['Real']=display.Real.map(money);display['Variación']=display.Variación.map(money);display['Ejercicio']=display.Ejercicio.map(lambda x:'—' if pd.isna(x) else f'{x:.1%}');styled=display.style.map(lambda v:f'color:{GREEN};font-weight:600' if str(v).startswith('$-') else f'color:{RED};font-weight:600',subset=['Variación']);st.dataframe(styled,hide_index=True,use_container_width=True)
+elif page=='Extraordinarios':
+    st.title('Gastos extraordinarios');years=sorted(extra.year.dropna().unique(),reverse=True);c1,c2=st.columns([1,3]);eyear=c1.selectbox('Año',years,key='extra_year');enames=[MONTHS[m] for m in sorted(extra.loc[extra.year==eyear,'month_num'].dropna().unique())];echosen=c2.multiselect('Meses a analizar',enames,default=enames,key='extra_months');emonths=[MONTH_NUM[m] for m in echosen];extra_view=extra[(extra.year==eyear)&(extra.month_num.isin(emonths))];st.metric('Total del periodo seleccionado',money(float(extra_view.amount.sum())))
+    with st.expander('Agregar gasto extraordinario'):
+        with st.form('extraordinary'):
+            f1,f2,f3=st.columns([1,2,1]);date=f1.date_input('Fecha');concept=f2.text_input('Concepto');amount=f3.number_input('Importe',min_value=0.0,step=100.0);sent=st.form_submit_button('Agregar renglón',type='primary')
+        if sent:
+            if not concept.strip() or amount<=0:st.error('Escribe concepto e importe.')
+            else:
+                try:insert_one('extraordinary_expenses',{'expense_date':date.isoformat(),'concept':concept.strip(),'amount':amount});st.rerun()
+                except Exception as e:st.error(str(e))
+    show=extra_view.rename(columns={'month':'Mes','concept':'Concepto','amount':'Importe'})[['Mes','Concepto','Importe']];show['Importe']=show.Importe.map(money);st.dataframe(show.style.set_properties(subset=['Importe'],**{'text-align':'center'}),hide_index=True,use_container_width=True);chart=extra_view.groupby(['month_num','month'],as_index=False).amount.sum().sort_values('month_num');fig=px.bar(chart,x='month',y='amount',title='Gastos extraordinarios por mes',text_auto=',.0f',color='month',color_discrete_sequence=MONTH_COLORS,labels={'month':'Mes','amount':'Importe'});fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(texttemplate='$%{y:,.0f}',textposition='outside');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+elif page=='Inversiones':
+    st.title('Inversiones y rendimientos');st.caption('Registra cada inversión y actualiza su valuación cuando quieras');investments=pd.DataFrame(fetch('investments'));valuations=pd.DataFrame(fetch('investment_valuations'))
+    if not investments.empty:
+        investments['balance']=pd.to_numeric(investments['balance']);investments['label']=investments['institution'].astype('string').fillna('')+' · '+investments['product'].astype('string').fillna('');inflation,cetes=st.columns(2);inflation_rate=inflation.number_input('Inflación anual de referencia %',min_value=0.0,value=4.0,step=0.1)/100;cetes_rate=cetes.number_input('CETES anual de referencia %',min_value=0.0,value=8.0,step=0.1)/100
+        if not valuations.empty:
+            valuations['value']=pd.to_numeric(valuations.value);valuations['valuation_date']=pd.to_datetime(valuations.valuation_date);valuations=valuations.sort_values(['investment_id','valuation_date'])
+        summary=[]
+        for _,inv in investments.iterrows():
+            history=valuations[valuations['investment_id']==inv['id']].copy() if not valuations.empty else pd.DataFrame()
+            if history.empty:first=latest=float(inv['balance']);previous=pd.NA;days=0
+            else:first=float(history.iloc[0]['value']);latest=float(history.iloc[-1]['value']);previous=float(history.iloc[-2]['value']) if len(history)>1 else pd.NA;days=max(0,(history.iloc[-1]['valuation_date']-history.iloc[0]['valuation_date']).days)
+            abs_change=latest-previous if pd.notna(previous) else pd.NA;pct_change=(latest/previous-1) if pd.notna(previous) and previous else pd.NA;total_return=(latest/first-1) if len(history)>1 and first else pd.NA;annualized=((latest/first)**(365/days)-1) if len(history)>1 and days>0 and first>0 and latest>=0 else pd.NA
+            projected=latest*(1+annualized) if pd.notna(annualized) else pd.NA;inflation_value=latest*(1+inflation_rate);cetes_value=latest*(1+cetes_rate);summary.append({'Inversión':inv['label'],'Valuaciones':len(history),'Valor actual':latest,'Cambio último':abs_change,'% último':pct_change,'Rendimiento total':total_return,'Proyección anual':annualized,'Proyección 12m':projected,'Referencia inflación 12m':inflation_value,'Diferencia vs. inflación':projected-inflation_value if pd.notna(projected) else pd.NA,'Referencia CETES 12m':cetes_value,'Diferencia vs. CETES':projected-cetes_value if pd.notna(projected) else pd.NA})
+        summary=pd.DataFrame(summary);st.metric('Patrimonio invertido',money(summary['Valor actual'].sum()));display=summary.copy()
+        for col in ['Valor actual','Cambio último','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else money(x))
+        for col in ['% último','Rendimiento total','Proyección anual']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else f'{x:.2%}')
+        st.dataframe(display.style.map(change_color,subset=['Cambio último']),hide_index=True,use_container_width=True);st.caption('“Cambio último” y “% último” comparan las dos valuaciones más recientes registradas para cada inversión.')
+        with st.expander('Registrar nueva valuación'):
+            valuation_investments={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
+            with st.form('valuation'):
+                v1,v2=st.columns(2);selected_label=v1.selectbox('Inversión',list(valuation_investments));vdate=v2.date_input('Fecha de valuación');value=v1.number_input('Valor actual',min_value=0.0,step=100.0);notes=v2.text_input('Nota opcional');save_value=st.form_submit_button('Guardar valuación',type='primary')
+            if save_value:
+                inv_id=valuation_investments[selected_label]
+                try:insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':vdate.isoformat(),'value':value,'notes':notes});st.success('Valuación registrada');st.rerun()
+                except Exception as e:st.error('No se pudo guardar. Si ya existe una valuación de ese día, usa otra fecha. '+str(e))
+        if not valuations.empty:
+            with st.expander('Consultar y corregir histórico de valuaciones'):
+                history_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
+                history_label=st.selectbox('Consultar inversión',list(history_options),key='history_investment');history_id=history_options[history_label]
+                selected_history=valuations[valuations['investment_id']==history_id].sort_values('valuation_date',ascending=False).copy()
+                if selected_history.empty:st.info('Esta inversión todavía no tiene valuaciones registradas.')
                 else:
-                    if auth.session and auth.user:
-                        st.success("Acceso activado correctamente. Ya puedes ingresar.")
-                    else:
-                        st.success("Acceso activado. Revisa tu correo si Supabase solicita confirmar la cuenta.")
-            except Exception as exc:
-                st.error(f"No fue posible activar el acceso: {exc}")
-    if submitted:
-        if not valid_official_email(email):
-            st.error("El acceso está limitado a cuentas @jalisco.gob.mx.")
-        elif not configured():
-            st.session_state.user = {"email": email.lower(), "id": "demo"}
-            st.rerun()
-        else:
+                    history_edit=selected_history[['id','valuation_date','value','notes']].rename(columns={'id':'ID','valuation_date':'Fecha','value':'Valor','notes':'Nota'});history_edit['Fecha']=history_edit['Fecha'].dt.date;history_edit['Nota']=history_edit['Nota'].fillna('');history_edit['Eliminar']=False
+                    st.caption('Haz doble clic en una celda para modificarla. Después pulsa “Guardar cambios”.')
+                    edited_history=st.data_editor(history_edit,hide_index=True,use_container_width=True,num_rows='fixed',disabled=['ID'],column_config={'ID':st.column_config.NumberColumn('ID',format='%d'),'Fecha':st.column_config.DateColumn('Fecha',format='YYYY-MM-DD',required=True),'Valor':st.column_config.NumberColumn('Valor',format='$ %.2f',min_value=0.0,required=True),'Nota':st.column_config.TextColumn('Nota'),'Eliminar':st.column_config.CheckboxColumn('Eliminar')},key=f'history_editor_{history_id}')
+                    confirm_value_delete=st.checkbox('Confirmo la eliminación de los renglones marcados.',key=f'confirm_history_delete_{history_id}');save_history=st.button('Guardar cambios',type='primary',key=f'save_history_{history_id}')
+                    if save_history:
+                        rows_to_delete=edited_history[edited_history['Eliminar']==True]
+                        if not rows_to_delete.empty and not confirm_value_delete:st.error('Marcaste valuaciones para eliminar. Confirma su eliminación antes de guardar.')
+                        else:
+                            try:
+                                db=client()
+                                for _,edited_row in edited_history.iterrows():
+                                    record_id=int(edited_row['ID'])
+                                    if bool(edited_row['Eliminar']):db.table('investment_valuations').delete().eq('id',record_id).execute()
+                                    else:
+                                        corrected_date=pd.to_datetime(edited_row['Fecha']).date().isoformat();corrected_value=float(edited_row['Valor']);corrected_note='' if pd.isna(edited_row['Nota']) else str(edited_row['Nota']);db.table('investment_valuations').update({'valuation_date':corrected_date,'value':corrected_value,'notes':corrected_note}).eq('id',record_id).execute()
+                                st.success('Histórico actualizado.');st.rerun()
+                            except Exception as e:st.error('No se pudieron guardar los cambios. Verifica que no haya dos valuaciones de la misma inversión en la misma fecha. '+str(e))
+        if not valuations.empty:
+            st.markdown('### Evolución por inversión')
+            st.caption('Cada inversión tiene su propia escala. Acerca o aleja con la rueda del mouse y haz doble clic para restablecer la vista.')
+
+            investment_colors=[BLUE,SKY,RED,'#FCA5A5',GOLD,GREEN,'#8B5CF6','#06B6D4']
+
+            for idx,(_,inv) in enumerate(investments.sort_values(['institution','product']).iterrows()):
+                inv_history=valuations[valuations['investment_id']==inv['id']].copy().sort_values('valuation_date')
+                if inv_history.empty:
+                    continue
+
+                # La gráfica muestra una sola valuación por día: la última registrada.
+                # El histórico conserva todos los registros disponibles.
+                inv_chart=inv_history.copy()
+                inv_chart['chart_date']=inv_chart['valuation_date'].dt.normalize()
+                inv_chart=inv_chart.sort_values('valuation_date').groupby('chart_date',as_index=False).tail(1).sort_values('chart_date')
+
+                current_value=float(inv_chart.iloc[-1]['value'])
+                previous_value=float(inv_chart.iloc[-2]['value']) if len(inv_chart)>1 else pd.NA
+                last_change=current_value-previous_value if pd.notna(previous_value) else pd.NA
+                last_pct=(current_value/previous_value-1) if pd.notna(previous_value) and previous_value else pd.NA
+
+                st.markdown(f"#### {inv['label']}")
+                m1,m2,m3=st.columns(3)
+                m1.metric('Valor actual',money(current_value))
+                if pd.isna(last_change):
+                    m2.metric('Cambio último','—')
+                    m3.metric('% último','—')
+                else:
+                    m2.metric('Cambio último',money(last_change),delta=money(last_change),delta_color='normal')
+                    m3.metric('% último',f'{last_pct:.2%}',delta=f'{last_pct:.2%}',delta_color='normal')
+
+                fig=go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=inv_chart['chart_date'],
+                    y=inv_chart['value'],
+                    mode='lines+markers',
+                    name=inv['label'],
+                    line=dict(width=3,color=investment_colors[idx%len(investment_colors)]),
+                    marker=dict(size=8,color=investment_colors[idx%len(investment_colors)]),
+                    hovertemplate='%{x|%d %b %Y}<br><b>$%{y:,.2f}</b><extra></extra>'
+                ))
+                fig.update_layout(
+                    dragmode='zoom',
+                    hovermode='x unified',
+                    showlegend=False,
+                    height=330,
+                    margin=dict(l=10,r=10,t=15,b=10)
+                )
+                fig.update_xaxes(
+                    title='Fecha',
+                    tickformat='%d %b %Y',
+                    dtick=86400000,
+                    fixedrange=False
+                )
+                fig.update_yaxes(
+                    title='Valor',
+                    tickprefix='$',
+                    tickformat=',.0f',
+                    autorange=True,
+                    fixedrange=False
+                )
+                st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+
+                if idx < len(investments)-1:
+                    st.divider()
+        with st.expander('Eliminar inversión'):
+            delete_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
+            with st.form('delete_investment'):
+                selected_delete=st.selectbox('Inversión a eliminar',list(delete_options));confirm_delete=st.checkbox('Entiendo que también se eliminará todo su historial de valuaciones.');delete_sent=st.form_submit_button('Eliminar definitivamente')
+            if delete_sent:
+                if not confirm_delete:st.error('Marca la casilla de confirmación antes de eliminar.')
+                else:
+                    try:client().table('investments').delete().eq('id',delete_options[selected_delete]).execute();st.success('Inversión e historial eliminados.');st.rerun()
+                    except Exception as e:st.error('No se pudo eliminar la inversión. '+str(e))
+    with st.expander('Agregar inversión',expanded=investments.empty):
+        with st.form('investment'):
+            c1,c2=st.columns(2);institution=c1.text_input('Institución');product=c2.text_input('Producto');owner=c1.text_input('Titular');asset=c2.selectbox('Tipo de activo',['Efectivo','Deuda','Renta variable','Fondo','Inmueble','Otro']);balance=c1.number_input('Valor inicial',min_value=0.0);rate=c2.number_input('Tasa anual esperada %',min_value=0.0);opened=st.date_input('Fecha inicial');sent=st.form_submit_button('Guardar',type='primary')
+        if sent:
             try:
-                auth = public_client().auth.sign_in_with_password({"email": email, "password": password})
-            except Exception as exc:
-                message = str(exc)
-                if "Invalid login credentials" in message:
-                    st.error("Supabase rechazó el correo o la contraseña: Invalid login credentials.")
-                elif "Email not confirmed" in message:
-                    st.error("La cuenta existe, pero el correo todavía no está confirmado en Supabase.")
-                else:
-                    st.error(f"Supabase no pudo autenticar la cuenta: {message}")
-                return
-            if not auth.user or not valid_official_email(auth.user.email or ""):
-                public_client().auth.sign_out()
-                st.error("La cuenta no pertenece al dominio autorizado.")
-                return
-            st.session_state.access_token = auth.session.access_token
-            st.session_state.refresh_token = auth.session.refresh_token
-            try:
-                user_client = client_with_token(auth.session.access_token, auth.session.refresh_token)
-                profile = access_profile(user_client, auth.user.email)
-            except Exception as exc:
-                st.error(f"La contraseña fue aceptada, pero falló la consulta de autorización: {exc}")
-                return
-            if not profile or not profile.get("activo"):
-                public_client().auth.sign_out()
-                st.session_state.pop("access_token", None)
-                st.session_state.pop("refresh_token", None)
-                st.error("La contraseña fue aceptada, pero tu acceso no está autorizado o está suspendido.")
-                return
-            st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id),
-                                     "nombre": profile.get("nombre") or auth.user.email,
-                                     "rol": profile.get("rol", "usuario")}
-            register_access(user_client)
-            st.rerun()
-
-
-def landing():
-    logo_header()
-    st.markdown(f'<div class="welcome">Sesión institucional activa · <b>{st.session_state.user["email"]}</b></div>', unsafe_allow_html=True)
-    cols = st.columns(3)
-    sections = [
-        ("01", "Programas / Proyectos", "Alta, consulta, edición y seguimiento de expedientes."),
-        ("02", "Junta de Gobierno", "Actas, acuerdos y documentación de las sesiones."),
-        ("03", "Comités", "Integración, sesiones, actas y dictaminación."),
-    ]
-    card_styles = ["card-blue", "card-green", "card-purple"]
-    for col, (icon, title, text), card_style in zip(cols, sections, card_styles):
-        with col:
-            st.markdown(f'<div class="card {card_style}"><div class="card-icon">{icon}</div><h3>{title}</h3><p class="muted">{text}</p></div>', unsafe_allow_html=True)
-            if st.button(f"Abrir {title}", key=title, use_container_width=True):
-                st.session_state.page = title
-                st.rerun()
-
-
-def objective_fields(existing=None):
-    existing = existing or [""]
-    if "objective_count" not in st.session_state:
-        st.session_state.objective_count = max(1, len(existing))
-    values = []
-    for index in range(st.session_state.objective_count):
-        default = existing[index] if index < len(existing) else ""
-        values.append(st.text_area(f"Objetivo específico {index + 1}", value=default, key=f"obj_{index}"))
-    col1, col2 = st.columns([1, 4])
-    if col1.form_submit_button("＋ Agregar objetivo"):
-        st.session_state.objective_count += 1
-        st.rerun()
-    if st.session_state.objective_count > 1 and col2.form_submit_button("Quitar último"):
-        st.session_state.objective_count -= 1
-        st.rerun()
-    return values
-
-
-def execution_goal_fields(existing=None):
-    existing = existing or []
-    if "execution_goal_count" not in st.session_state:
-        st.session_state.execution_goal_count = max(1, len(existing))
-    goals, evidence_groups = [], []
-    statuses = ["Por iniciar", "En progreso", "Terminada"]
-    for index in range(st.session_state.execution_goal_count):
-        saved = existing[index] if index < len(existing) else {}
-        saved_status = saved.get("estatus", "Por iniciar")
-        display_status = st.session_state.get(f"goal_status_{index}", saved_status)
-        status_class = {"Por iniciar": "status-red", "En progreso": "status-yellow", "Terminada": "status-green"}.get(display_status, "status-gray")
-        st.markdown(f'<div class="goal-heading {status_class}">Meta de ejecución {index + 1} · {display_status}</div>', unsafe_allow_html=True)
-        name = st.text_input("Nombre de la meta", value=saved.get("nombre", ""), key=f"goal_name_{index}")
-        description = st.text_area("Descripción", value=saved.get("descripcion", ""), key=f"goal_description_{index}", height=90)
-        g1, g2 = st.columns(2)
-        status = g1.selectbox("Estatus", statuses, index=statuses.index(saved_status) if saved_status in statuses else 0,
-                              key=f"goal_status_{index}")
-        target_date = g2.text_input("Fecha objetivo", value=saved.get("fecha_objetivo", ""),
-                                    placeholder="Ej. 30/09/2026", key=f"goal_date_{index}")
-        evidence = st.file_uploader("Evidencia de la meta (fotografías o documentos)", accept_multiple_files=True,
-                                    key=f"goal_evidence_{index}")
-        goals.append({"nombre": name.strip(), "descripcion": description.strip(), "estatus": status,
-                      "fecha_objetivo": target_date.strip(),
-                      "evidencias_nombres": [file.name for file in evidence]})
-        evidence_groups.append(evidence)
-    c1, c2 = st.columns([1, 3])
-    add_goal = c1.form_submit_button("＋ Agregar meta", use_container_width=True)
-    remove_goal = c2.form_submit_button("Quitar última meta", use_container_width=True) if st.session_state.execution_goal_count > 1 else False
-    return goals, evidence_groups, add_goal, remove_goal
-
-
-def project_form(direction: str, project=None):
-    project = project or {}
-    st.subheader("Editar proyecto" if project else "Dar de alta nuevo proyecto")
-    with st.form("project_form", clear_on_submit=False):
-        is_projects = direction == "Dirección de Proyectos"
-        if is_projects:
-            general_tab, advance_tab = st.tabs(["Ficha general", "Avance"])
-        else:
-            general_tab, advance_tab = st.container(), None
-
-        with general_tab:
-            st.markdown("### Información General")
-            name = st.text_input("Nombre del proyecto *", value=project.get("nombre", ""))
-            applicant = st.text_input("Nombre del solicitante *", value=project.get("solicitante", ""))
-            municipality = st.selectbox("Municipio de ejecución *", MUNICIPIOS_JALISCO,
-                                        index=MUNICIPIOS_JALISCO.index(project["municipio"]) if project.get("municipio") in MUNICIPIOS_JALISCO else 0)
-            c1, c2 = st.columns(2)
-            year = c1.number_input("Año de inicio *", min_value=2000, max_value=2100,
-                                   value=int(project.get("anio_inicio", datetime.now().year)), step=1)
-            amount = c2.number_input("Monto (MXN) *", min_value=0.0, value=float(project.get("monto", 0)), step=1000.0, format="%.2f")
-            general = st.text_area("Objetivo general *", value=project.get("objetivo_general", ""), height=130)
-            st.markdown("#### Objetivos específicos")
-            objectives = objective_fields(project.get("objetivos_especificos"))
-
-            st.markdown("### Gestión Documental")
-            legal = st.file_uploader("Documentación jurídica", accept_multiple_files=True, key="legal")
-            auxiliary = st.file_uploader("Documentación auxiliar", accept_multiple_files=True, key="aux")
-            committee = st.file_uploader("Acta del Comité de Dictaminación", accept_multiple_files=False, key="committee")
-            board = st.file_uploader("Acta de aprobación de Junta de Gobierno", accept_multiple_files=False, key="board")
-            agreement = st.file_uploader("Convenio de colaboración", accept_multiple_files=False, key="agreement")
-
-            st.markdown("### Evidencia fotográfica")
-            photos = st.file_uploader("Fotografías generales (máximo 5 MB por archivo)", type=["jpg", "jpeg", "png", "webp"],
-                                      accept_multiple_files=True, key="photos")
-
-            if not is_projects:
-                st.markdown("### Monitoreo y Seguimiento")
-                previous_monitoring = project.get("monitoreo", {}) or {}
-                m1, m2 = st.columns(2)
-                statuses = ["Sin iniciar", "En planeación", "En ejecución", "Suspendido", "Concluido"]
-                current_status = previous_monitoring.get("estatus", "Sin iniciar")
-                status = m1.selectbox("Estatus del proyecto", statuses,
-                                      index=statuses.index(current_status) if current_status in statuses else 0)
-                responsible = m2.text_input("Responsable del seguimiento", value=previous_monitoring.get("responsable", ""))
-                m3, m4 = st.columns(2)
-                period = m3.text_input("Periodo de seguimiento", value=previous_monitoring.get("periodo", ""))
-                progress = m4.slider("Porcentaje de avance", 0, 100, int(previous_monitoring.get("avance", 0)), 5)
-                monitoring_progress = st.text_area("Principales avances", value=previous_monitoring.get("avances", ""), height=100)
-                pending = st.text_area("Pendientes o riesgos", value=previous_monitoring.get("pendientes", ""), height=90)
-                next_actions = st.text_area("Próximas acciones", value=previous_monitoring.get("proximas_acciones", ""), height=90)
-                observations = st.text_area("Observaciones de seguimiento", value=previous_monitoring.get("observaciones", ""), height=90)
-
-        execution_goals, goal_evidence_groups, add_goal, remove_goal = [], [], False, False
-        budget_dispersed = 0.0
-        if is_projects:
-            with advance_tab:
-                saved_advance = project.get("avance_proyecto", {}) or {}
-                st.markdown("### Ejecución financiera")
-                budget_dispersed = st.number_input("Presupuesto dispersado (MXN)", min_value=0.0,
-                                                   value=float(saved_advance.get("presupuesto_dispersado", 0)), step=1000.0, format="%.2f")
-                budget_pct = min(100.0, (budget_dispersed / amount * 100)) if amount else 0.0
-                saved_goals = saved_advance.get("metas", []) or []
-                st.markdown("### Metas de ejecución")
-                execution_goals, goal_evidence_groups, add_goal, remove_goal = execution_goal_fields(saved_goals)
-                completed = sum(1 for goal in execution_goals if goal["estatus"] == "Terminada")
-                in_progress = sum(1 for goal in execution_goals if goal["estatus"] == "En progreso")
-                physical_pct = ((completed * 100 + in_progress * 50) / len(execution_goals)) if execution_goals else 0
-                traffic = "Verde" if physical_pct >= 80 else "Amarillo" if physical_pct >= 40 else "Rojo"
-                traffic_class = "metric-green" if traffic == "Verde" else "metric-orange" if traffic == "Amarillo" else "metric-blue"
-                st.markdown(f'''<div class="metric-grid">
-                  <div class="metric-box metric-blue"><div class="metric-label">Avance financiero</div><div class="metric-value">{budget_pct:.1f}%</div></div>
-                  <div class="metric-box metric-green"><div class="metric-label">Metas terminadas</div><div class="metric-value">{completed}/{len(execution_goals)}</div></div>
-                  <div class="metric-box metric-purple"><div class="metric-label">Avance físico</div><div class="metric-value">{physical_pct:.1f}%</div></div>
-                  <div class="metric-box {traffic_class}"><div class="metric-label">Semáforo general</div><div class="metric-value">{traffic}</div></div>
-                </div>''', unsafe_allow_html=True)
-                refresh_metrics = st.form_submit_button("Actualizar indicadores", use_container_width=True)
-        else:
-            budget_pct, physical_pct, traffic, completed = 0, float(progress), current_status, 0
-            refresh_metrics = False
-
-        st.markdown("### Ficha del proyecto")
-        st.caption("La ficha incluye información general, monitoreo y evidencia fotográfica. Gestión Documental no se muestra.")
-        b1, b2 = st.columns(2)
-        preview = b1.form_submit_button("Previsualizar ficha", use_container_width=True)
-        save = b2.form_submit_button("Guardar proyecto", type="primary", use_container_width=True)
-
-    if add_goal:
-        st.session_state.execution_goal_count += 1
-        st.rerun()
-    if remove_goal:
-        st.session_state.execution_goal_count -= 1
-        st.rerun()
-    if refresh_metrics:
-        st.rerun()
-
-    if save or preview:
-        errors = []
-        if not name.strip() or not applicant.strip() or not general.strip():
-            errors.append("Completa todos los campos obligatorios.")
-        clean_objectives = [o.strip() for o in objectives if o.strip()]
-        if not clean_objectives:
-            errors.append("Agrega al menos un objetivo específico.")
-        oversized = [f.name for f in photos if f.size > 5 * 1024 * 1024]
-        oversized += [f.name for files in goal_evidence_groups for f in files if f.size > 5 * 1024 * 1024]
-        if oversized:
-            errors.append("Estas fotografías exceden 5 MB: " + ", ".join(oversized))
-        if errors:
-            for error in errors:
-                st.error(error)
-            return
-        if is_projects:
-            advance_data = {"presupuesto_dispersado": budget_dispersed, "porcentaje_financiero": round(budget_pct, 2),
-                            "porcentaje_fisico": round(physical_pct, 2), "semaforo": traffic,
-                            "metas_terminadas": completed, "metas": execution_goals}
-            monitoring_data = {"estatus": traffic, "responsable": "", "periodo": "", "avance": round(physical_pct),
-                               "avances": f"{completed} de {len(execution_goals)} metas terminadas. Avance financiero: {budget_pct:.1f}%.",
-                               "pendientes": "", "proximas_acciones": "", "observaciones": ""}
-        else:
-            advance_data = {}
-            monitoring_data = {"estatus": status, "responsable": responsible.strip(), "periodo": period.strip(),
-                               "avance": int(progress), "avances": monitoring_progress.strip(),
-                               "pendientes": pending.strip(), "proximas_acciones": next_actions.strip(),
-                               "observaciones": observations.strip()}
-        payload = {"direccion": direction, "nombre": name.strip(), "solicitante": applicant.strip(),
-                   "municipio": municipality, "anio_inicio": int(year), "monto": amount,
-                   "objetivo_general": general.strip(), "objetivos_especificos": clean_objectives,
-                   "monitoreo": monitoring_data, "avance_proyecto": advance_data,
-                   "creado_por": st.session_state.user["id"]}
-        if preview:
-            photo_bytes = [photo.getvalue() for photo in photos]
-            photo_bytes += [file.getvalue() for files in goal_evidence_groups for file in files
-                            if (file.type or "").startswith("image/")]
-            st.session_state.ficha_data = payload
-            st.session_state.ficha_photos = photo_bytes
-            st.session_state.ficha_pdf = build_pdf(payload, photo_bytes, "assets/logo_coinvierte.jpeg")
-            st.session_state.ficha_docx = build_docx(payload, photo_bytes, "assets/logo_coinvierte.jpeg")
-            st.rerun()
-        if not configured():
-            st.success("Proyecto validado correctamente (modo demostración; aún no se guarda en base de datos).")
-            st.json(payload)
-            return
-        try:
-            client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-            if project:
-                result = client.table("proyectos").update(payload).eq("id", project["id"]).execute()
-            else:
-                result = client.table("proyectos").insert(payload).execute()
-            project_id = str(result.data[0]["id"])
-            groups = {"juridica": legal, "auxiliar": auxiliary, "acta_comite": [committee] if committee else [],
-                      "acta_junta": [board] if board else [], "convenio": [agreement] if agreement else [],
-                      "fotografia": photos}
-            for category, files in groups.items():
-                upload_files(client, project_id, category, files)
-            for files in goal_evidence_groups:
-                upload_files(client, project_id, "evidencia_meta", files)
-            st.success("Proyecto guardado correctamente.")
-        except Exception as exc:
-            st.error(f"No fue posible guardar el proyecto: {exc}")
-
-    if st.session_state.get("ficha_data"):
-        render_project_preview(st.session_state.ficha_data, st.session_state.get("ficha_photos", []))
-
-
-def render_project_preview(data: dict, photos: list[bytes]):
-    st.markdown("---")
-    st.markdown("## Previsualización de la ficha")
-    st.caption("Gestión Documental se excluye intencionalmente de esta ficha.")
-    st.markdown(f'''<div class="card card-blue">
-      <div class="card-icon">FP</div><h3>{data.get("nombre") or "Proyecto sin nombre"}</h3>
-      <p class="muted"><b>{data.get("direccion", "")}</b><br>{data.get("solicitante", "")} · {data.get("municipio", "")} · {data.get("anio_inicio", "")}</p>
-      <p><b>Monto:</b> ${float(data.get("monto", 0)):,.2f} MXN</p></div>''', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### Información General")
-        st.markdown(f"**Objetivo general**\n\n{data.get('objetivo_general') or 'Sin información'}")
-        st.markdown("**Objetivos específicos**")
-        for objective in data.get("objetivos_especificos", []):
-            st.markdown(f"- {objective}")
-    with c2:
-        advance = data.get("avance_proyecto", {}) or {}
-        if advance:
-            st.markdown("### Avance del Proyecto")
-            st.progress(int(advance.get("porcentaje_fisico", 0)), text=f"Avance físico: {advance.get('porcentaje_fisico', 0)}%")
-            st.markdown(f"**Presupuesto dispersado:** ${float(advance.get('presupuesto_dispersado',0)):,.2f} MXN  \n"
-                        f"**Avance financiero:** {advance.get('porcentaje_financiero',0)}%  \n"
-                        f"**Semáforo:** {advance.get('semaforo','Sin información')}")
-            for index, goal in enumerate(advance.get("metas", []), 1):
-                color = {"Por iniciar":"🔴","En progreso":"🟡","Terminada":"🟢"}.get(goal.get("estatus"),"⚪")
-                st.markdown(f"**{color} Meta {index}: {goal.get('nombre') or 'Sin nombre'}**  \n"
-                            f"{goal.get('descripcion') or 'Sin descripción'}  \n"
-                            f"Fecha objetivo: {goal.get('fecha_objetivo') or 'Sin fecha'}")
-        else:
-            st.markdown("### Monitoreo y Seguimiento")
-            monitoring = data.get("monitoreo", {})
-            st.progress(int(monitoring.get("avance", 0)), text=f"Avance: {monitoring.get('avance', 0)}%")
-            st.markdown(f"**Estatus:** {monitoring.get('estatus', 'Sin información')}  \n"
-                        f"**Responsable:** {monitoring.get('responsable') or 'Sin información'}  \n"
-                        f"**Periodo:** {monitoring.get('periodo') or 'Sin información'}")
-            for label, key in [("Principales avances","avances"),("Pendientes o riesgos","pendientes"),
-                               ("Próximas acciones","proximas_acciones"),("Observaciones","observaciones")]:
-                if monitoring.get(key):
-                    st.markdown(f"**{label}**\n\n{monitoring[key]}")
-    st.markdown("### Evidencia Fotográfica")
-    if photos:
-        columns = st.columns(2)
-        for index, photo in enumerate(photos):
-            columns[index % 2].image(photo, caption=f"Fotografía {index + 1}", use_container_width=True)
-    else:
-        st.info("No se cargó evidencia fotográfica para esta ficha.")
-    name = "_".join((data.get("nombre") or "proyecto").lower().split())[:60]
-    d1, d2, d3 = st.columns([1,1,2])
-    d1.download_button("Descargar PDF", st.session_state.ficha_pdf, f"ficha_{name}.pdf", "application/pdf", use_container_width=True)
-    d2.download_button("Descargar Word", st.session_state.ficha_docx, f"ficha_{name}.docx",
-                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
-    if d3.button("Cerrar previsualización", use_container_width=True):
-        for key in ["ficha_data", "ficha_photos", "ficha_pdf", "ficha_docx"]:
-            st.session_state.pop(key, None)
-        st.rerun()
-
-
-def project_is_active(project: dict) -> bool:
-    if project.get("direccion") == "Dirección de Proyectos":
-        goals = (project.get("avance_proyecto") or {}).get("metas", [])
-        return not goals or any(goal.get("estatus") != "Terminada" for goal in goals)
-    return (project.get("monitoreo") or {}).get("estatus") != "Concluido"
-
-
-def render_readonly_project(project: dict, photos: list[bytes]):
-    name = html.escape(project.get("nombre") or "Proyecto sin nombre")
-    st.markdown(f'''<div class="card card-blue"><div class="card-icon">VP</div><h3>{name}</h3>
-      <p class="muted"><b>{html.escape(project.get("solicitante") or "")}</b><br>
-      {html.escape(project.get("municipio") or "")} · {project.get("anio_inicio", "")}</p>
-      <p><b>Monto total:</b> ${float(project.get("monto",0)):,.2f} MXN</p></div>''', unsafe_allow_html=True)
-
-    is_projects = project.get("direccion") == "Dirección de Proyectos"
-    tab_labels = ["Ficha general", "Avance"] if is_projects else ["Ficha general", "Monitoreo y seguimiento"]
-    general_tab, progress_tab = st.tabs(tab_labels)
-    with general_tab:
-        st.markdown("### Información General")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Municipio", project.get("municipio") or "Sin información")
-        c2.metric("Año de inicio", project.get("anio_inicio") or "Sin información")
-        c3.metric("Monto", f'${float(project.get("monto",0)):,.2f}')
-        st.markdown("#### Objetivo general")
-        st.write(project.get("objetivo_general") or "Sin información")
-        st.markdown("#### Objetivos específicos")
-        for objective in project.get("objetivos_especificos", []):
-            st.markdown(f"- {objective}")
-        st.markdown("#### Evidencia fotográfica")
-        if photos:
-            columns = st.columns(2)
-            for index, photo in enumerate(photos):
-                columns[index % 2].image(photo, caption=f"Evidencia {index + 1}", use_container_width=True)
-        else:
-            st.info("Este proyecto todavía no tiene fotografías disponibles.")
-
-    with progress_tab:
-        if is_projects:
-            advance = project.get("avance_proyecto", {}) or {}
-            total_goals = len(advance.get("metas", []))
-            st.markdown(f'''<div class="metric-grid">
-              <div class="metric-box metric-blue"><div class="metric-label">Avance financiero</div><div class="metric-value">{advance.get("porcentaje_financiero",0)}%</div></div>
-              <div class="metric-box metric-green"><div class="metric-label">Metas terminadas</div><div class="metric-value">{advance.get("metas_terminadas",0)}/{total_goals}</div></div>
-              <div class="metric-box metric-purple"><div class="metric-label">Avance físico</div><div class="metric-value">{advance.get("porcentaje_fisico",0)}%</div></div>
-              <div class="metric-box metric-orange"><div class="metric-label">Semáforo</div><div class="metric-value">{advance.get("semaforo","Sin datos")}</div></div>
-            </div>''', unsafe_allow_html=True)
-            st.markdown(f"**Presupuesto dispersado:** ${float(advance.get('presupuesto_dispersado',0)):,.2f} MXN")
-            if not advance.get("metas"):
-                st.info("Todavía no se han registrado metas de ejecución.")
-            for index, goal in enumerate(advance.get("metas", []), 1):
-                icon = {"Por iniciar":"🔴", "En progreso":"🟡", "Terminada":"🟢"}.get(goal.get("estatus"), "⚪")
-                with st.expander(f"{icon} Meta {index}: {goal.get('nombre') or 'Sin nombre'} · {goal.get('estatus','')}", expanded=True):
-                    st.write(goal.get("descripcion") or "Sin descripción")
-                    st.caption(f"Fecha objetivo: {goal.get('fecha_objetivo') or 'Sin fecha'}")
-                    evidence_names = goal.get("evidencias_nombres", [])
-                    st.write("**Evidencias:** " + (", ".join(evidence_names) if evidence_names else "Sin evidencia"))
-        else:
-            monitoring = project.get("monitoreo", {}) or {}
-            st.progress(int(monitoring.get("avance", 0)), text=f"Avance: {monitoring.get('avance',0)}%")
-            for label, key in [("Estatus","estatus"),("Responsable","responsable"),("Periodo","periodo"),
-                               ("Principales avances","avances"),("Pendientes o riesgos","pendientes"),
-                               ("Próximas acciones","proximas_acciones"),("Observaciones","observaciones")]:
-                st.markdown(f"**{label}:** {monitoring.get(key) or 'Sin información'}")
-
-    pdf = build_pdf(project, photos, "assets/logo_coinvierte.jpeg")
-    docx = build_docx(project, photos, "assets/logo_coinvierte.jpeg")
-    safe_name = "_".join((project.get("nombre") or "proyecto").lower().split())[:60]
-    d1, d2 = st.columns(2)
-    d1.download_button("Descargar ficha en PDF", pdf, f"ficha_{safe_name}.pdf", "application/pdf", use_container_width=True)
-    d2.download_button("Descargar ficha en Word", docx, f"ficha_{safe_name}.docx",
-                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
-
-
-def view_active_projects(direction: str):
-    if not configured():
-        st.info("La visualización de proyectos estará disponible al conectar Supabase.")
-        return
-    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-    rows = client.table("proyectos").select("*").eq("direccion", direction).order("updated_at", desc=True).execute().data
-    active = [project for project in rows or [] if project_is_active(project)]
-    selected_id = st.session_state.get("view_project_id")
-    if selected_id:
-        project = next((item for item in active if str(item["id"]) == str(selected_id)), None)
-        if not project:
-            st.session_state.pop("view_project_id", None)
-            st.rerun()
-        if st.button("← Volver a proyectos activos"):
-            st.session_state.pop("view_project_id", None)
-            st.session_state.pop("view_project_photos", None)
-            st.rerun()
-        if "view_project_photos" not in st.session_state:
-            st.session_state.view_project_photos = download_project_images(client, str(project["id"]))
-        render_readonly_project(project, st.session_state.view_project_photos)
-        return
-
-    st.markdown("## Proyectos activos")
-    st.caption(f"{direction} · Selecciona un proyecto para consultar su información")
-    if not active:
-        st.info("No hay proyectos activos registrados en esta dirección.")
-        return
-    labels = {f"{p['nombre']} — {p['municipio']} ({p['anio_inicio']})": p for p in active}
-    selected_label = st.selectbox("Proyecto", list(labels.keys()))
-    selected = labels[selected_label]
-    advance = selected.get("avance_proyecto", {}) or {}
-    st.markdown(f'''<div class="card card-green"><div class="card-icon">{len(active)}</div>
-      <h3>{html.escape(selected.get("nombre") or "")}</h3><p class="muted">{html.escape(selected.get("solicitante") or "")} · 
-      {html.escape(selected.get("municipio") or "")}</p><p><b>Avance:</b> {advance.get("porcentaje_fisico", (selected.get("monitoreo") or {}).get("avance",0))}%</p></div>''', unsafe_allow_html=True)
-    if st.button("Ver información del proyecto", type="primary", use_container_width=True):
-        st.session_state.view_project_id = str(selected["id"])
-        st.session_state.pop("view_project_photos", None)
-        st.rerun()
-
-
-def user_management():
-    st.title("Gestión de usuarios")
-    if st.session_state.user.get("rol") != "administrador":
-        st.error("No tienes permisos para acceder a este módulo.")
-        return
-    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-    create_tab, users_tab = st.tabs(["Generar código temporal", "Usuarios autorizados"])
-    with create_tab:
-        st.markdown("### Autorizar a una persona")
-        with st.form("create_access_code"):
-            name = st.text_input("Nombre de la persona")
-            email = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
-            hours = st.selectbox("Vigencia del código", [24, 48, 72, 168],
-                                 format_func=lambda value: "7 días" if value == 168 else f"{value} horas")
-            create_code = st.form_submit_button("Generar código de acceso", type="primary", use_container_width=True)
-        if create_code:
-            if not valid_official_email(email):
-                st.error("Sólo se pueden autorizar correos @jalisco.gob.mx.")
-            else:
-                try:
-                    result = client.rpc("crear_codigo_acceso", {"p_email": email.lower().strip(),
-                                                                 "p_nombre": name.strip(), "p_horas": hours}).execute().data
-                    record = result[0] if isinstance(result, list) else result
-                    st.session_state.generated_code = record
-                    st.session_state.generated_email = email.lower().strip()
-                except Exception as exc:
-                    st.error(f"No fue posible generar el código: {exc}")
-        if st.session_state.get("generated_code"):
-            record = st.session_state.generated_code
-            st.success(f"Código generado para {st.session_state.generated_email}")
-            st.code(record.get("codigo", ""), language=None)
-            st.caption(f"Vence: {record.get('vence', '')}. Compártelo únicamente con la persona autorizada.")
-
-    with users_tab:
-        rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo,ultimo_acceso,created_at").order("created_at", desc=True).execute().data
-        if not rows:
-            st.info("Todavía no hay usuarios registrados.")
-        else:
-            st.dataframe([{ "Nombre": row.get("nombre"), "Correo": row.get("email"), "Rol": row.get("rol"),
-                            "Estado": "Activo" if row.get("activo") else "Suspendido / pendiente",
-                            "Último acceso": row.get("ultimo_acceso") or "Sin acceso"} for row in rows],
-                         use_container_width=True, hide_index=True)
-            manageable = [row for row in rows if row.get("rol") != "administrador"]
-            if manageable:
-                labels = {f"{row.get('nombre') or 'Sin nombre'} — {row['email']}": row for row in manageable}
-                selected_label = st.selectbox("Administrar usuario", list(labels.keys()))
-                selected = labels[selected_label]
-                c1, c2 = st.columns(2)
-                if selected.get("activo"):
-                    if c1.button("Suspender acceso", use_container_width=True):
-                        client.table("usuarios_autorizados").update({"activo": False}).eq("id", selected["id"]).execute()
-                        st.success("Acceso suspendido.")
-                        st.rerun()
-                else:
-                    if c1.button("Reactivar acceso", use_container_width=True):
-                        client.table("usuarios_autorizados").update({"activo": True}).eq("id", selected["id"]).execute()
-                        st.success("Acceso reactivado.")
-                        st.rerun()
-                if c2.button("Generar nuevo código", use_container_width=True):
-                    result = client.rpc("crear_codigo_acceso", {"p_email": selected["email"],
-                                                                 "p_nombre": selected.get("nombre") or "", "p_horas": 24}).execute().data
-                    st.session_state.generated_code = result[0] if isinstance(result, list) else result
-                    st.session_state.generated_email = selected["email"]
-                    st.success("Nuevo código generado. Consúltalo en la primera pestaña.")
-
-
-def programs():
-    direction = st.session_state.get("program_direction")
-    action = st.session_state.get("program_action")
-
-    if not direction:
-        st.markdown('<h1 class="choice-title">Programas / Proyectos</h1>', unsafe_allow_html=True)
-        st.markdown('<p class="choice-subtitle">Selecciona la dirección responsable para continuar</p>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2, gap="large")
-        with c1:
-            st.markdown('''<div class="choice-card choice-operations"><div class="choice-icon">DO</div>
-                <h3>Dirección de Operaciones</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
-            if st.button("Ingresar a Operaciones", key="choose_operations", use_container_width=True, type="primary"):
-                st.session_state.program_direction = "Dirección de Operaciones"
-                st.session_state.pop("program_action", None)
-                st.rerun()
-        with c2:
-            st.markdown('''<div class="choice-card choice-projects"><div class="choice-icon">DP</div>
-                <h3>Dirección de Proyectos</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
-            if st.button("Ingresar a Proyectos", key="choose_projects", use_container_width=True, type="primary"):
-                st.session_state.program_direction = "Dirección de Proyectos"
-                st.session_state.pop("program_action", None)
-                st.rerun()
-        return
-
-    if not action:
-        top1, top2 = st.columns([1, 5])
-        if top1.button("← Direcciones", use_container_width=True):
-            st.session_state.pop("program_direction", None)
-            st.rerun()
-        top2.markdown(f"### {direction}")
-        st.markdown('<p class="choice-subtitle">Selecciona la acción que deseas realizar</p>', unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3, gap="large")
-        with c1:
-            st.markdown('''<div class="choice-card choice-new"><div class="choice-icon">＋</div>
-                <h3>Dar de alta nuevo proyecto</h3><p>Crear un expediente e incorporar su información general, documentos y seguimiento.</p></div>''', unsafe_allow_html=True)
-            if st.button("Crear nuevo proyecto", key="choose_new", use_container_width=True, type="primary"):
-                st.session_state.program_action = "new"
-                st.session_state.objective_count = 1
-                st.rerun()
-        with c2:
-            st.markdown('''<div class="choice-card choice-edit"><div class="choice-icon">✎</div>
-                <h3>Editar proyecto</h3><p>Consultar un expediente existente para actualizar su información y seguimiento.</p></div>''', unsafe_allow_html=True)
-            if st.button("Consultar y editar", key="choose_edit", use_container_width=True, type="primary"):
-                st.session_state.program_action = "edit"
-                st.rerun()
-        with c3:
-            st.markdown('''<div class="choice-card choice-view"><div class="choice-icon">◉</div>
-                <h3>Visualizar proyectos</h3><p>Consultar los proyectos activos y acceder a su ficha general y avance.</p></div>''', unsafe_allow_html=True)
-            if st.button("Ver proyectos activos", key="choose_view", use_container_width=True, type="primary"):
-                st.session_state.program_action = "view"
-                st.session_state.pop("view_project_id", None)
-                st.rerun()
-        return
-
-    nav1, nav2 = st.columns([1, 5])
-    if nav1.button("← Acciones", use_container_width=True):
-        st.session_state.pop("program_action", None)
-        for key in ["ficha_data", "ficha_photos", "ficha_pdf", "ficha_docx"]:
-            st.session_state.pop(key, None)
-        st.session_state.pop("view_project_id", None)
-        st.session_state.pop("view_project_photos", None)
-        st.rerun()
-    nav2.markdown(f"### {direction}")
-
-    if action == "new":
-        project_form(direction)
-    elif action == "view":
-        try:
-            view_active_projects(direction)
-        except Exception as exc:
-            st.error(f"No fue posible consultar los proyectos activos: {exc}")
-    elif not configured():
-        st.info("La consulta y edición estarán disponibles al conectar Supabase.")
-    else:
-        try:
-            client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-            rows = client.table("proyectos").select("*").eq("direccion", direction).order("updated_at", desc=True).execute().data
-            if not rows:
-                st.info("Todavía no hay proyectos registrados en esta dirección.")
-            else:
-                labels = {f"{p['nombre']} — {p['municipio']} ({p['anio_inicio']})": p for p in rows}
-                selected = st.selectbox("Selecciona el proyecto", labels)
-                project_form(direction, labels[selected])
-        except Exception as exc:
-            st.error(f"No fue posible consultar los proyectos: {exc}")
-
-
-def placeholder(title: str):
-    st.title(title)
-    st.info("Módulo preparado para desarrollarse en la siguiente etapa.")
-
-
-if "user" not in st.session_state:
-    login()
+                saved=insert_one('investments',{'institution':institution,'product':product,'owner':owner,'asset_type':asset,'balance':balance,'annual_rate':rate,'opened_on':opened.isoformat()});inv_id=saved[0]['id'] if isinstance(saved,list) else saved['id'];insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':opened.isoformat(),'value':balance,'notes':'Valuación inicial'});st.success('Inversión guardada');st.rerun()
+            except Exception as e:st.error(str(e))
 else:
-    with st.sidebar:
-        st.markdown(brand_html(sidebar=True), unsafe_allow_html=True)
-        if st.button("Inicio", use_container_width=True):
-            st.session_state.page = "Inicio"
-            st.rerun()
-        if st.button("Programas / Proyectos", use_container_width=True):
-            st.session_state.page = "Programas / Proyectos"
-            st.session_state.pop("program_direction", None)
-            st.session_state.pop("program_action", None)
-            st.rerun()
-        if st.button("Junta de Gobierno", use_container_width=True):
-            st.session_state.page = "Junta de Gobierno"
-            st.rerun()
-        if st.button("Comités", use_container_width=True):
-            st.session_state.page = "Comités"
-            st.rerun()
-        if st.session_state.user.get("rol") == "administrador":
-            if st.button("Gestión de usuarios", use_container_width=True):
-                st.session_state.page = "Gestión de usuarios"
-                st.rerun()
-        st.divider()
-        if st.button("Cerrar sesión", use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
-    page = st.session_state.get("page", "Inicio")
-    if page == "Inicio": landing()
-    elif page == "Programas / Proyectos": programs()
-    elif page == "Gestión de usuarios": user_management()
-    else: placeholder(page)
+    st.title('Importar movimientos de Alzex');st.write('Carga un CSV completo o mensual. La huella de cada movimiento evita duplicados.');uploaded=st.file_uploader('Archivo CSV',type=['csv'])
+    if uploaded:
+        try:
+            parsed=parse_alzex(uploaded.getvalue(),uploaded.name);existing={r['fingerprint'] for r in fetch('movements')};new=parsed[~parsed.fingerprint.isin(existing)];c1,c2,c3=st.columns(3);c1.metric('Movimientos válidos',f'{len(parsed):,}');c2.metric('Nuevos',f'{len(new):,}');c3.metric('Duplicados',f'{len(parsed)-len(new):,}');st.dataframe(new.head(50),use_container_width=True,hide_index=True)
+            if st.button('Confirmar importación',type='primary',disabled=new.empty):insert_rows('movements',new.where(pd.notna(new),None).to_dict('records'));insert_one('imports',{'file_name':uploaded.name,'row_count':len(parsed),'new_rows':len(new),'duplicate_rows':len(parsed)-len(new)});st.success('Importación completada');st.cache_data.clear();st.rerun()
+        except Exception as e:st.error(f'No se pudo leer el archivo: {e}')
