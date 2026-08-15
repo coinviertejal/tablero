@@ -141,25 +141,36 @@ def login():
         else:
             try:
                 auth = public_client().auth.sign_in_with_password({"email": email, "password": password})
-                if not auth.user or not valid_official_email(auth.user.email or ""):
-                    public_client().auth.sign_out()
-                    st.error("La cuenta no pertenece al dominio autorizado.")
-                    return
-                st.session_state.access_token = auth.session.access_token
+            except Exception as exc:
+                message = str(exc)
+                if "Invalid login credentials" in message:
+                    st.error("Supabase rechazó el correo o la contraseña: Invalid login credentials.")
+                elif "Email not confirmed" in message:
+                    st.error("La cuenta existe, pero el correo todavía no está confirmado en Supabase.")
+                else:
+                    st.error(f"Supabase no pudo autenticar la cuenta: {message}")
+                return
+            if not auth.user or not valid_official_email(auth.user.email or ""):
+                public_client().auth.sign_out()
+                st.error("La cuenta no pertenece al dominio autorizado.")
+                return
+            st.session_state.access_token = auth.session.access_token
+            try:
                 user_client = client_with_token(auth.session.access_token)
                 profile = access_profile(user_client, auth.user.email)
-                if not profile or not profile.get("activo"):
-                    public_client().auth.sign_out()
-                    st.session_state.pop("access_token", None)
-                    st.error("Tu acceso no está autorizado o fue suspendido. Contacta al administrador.")
-                    return
-                st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id),
-                                         "nombre": profile.get("nombre") or auth.user.email,
-                                         "rol": profile.get("rol", "usuario")}
-                register_access(user_client)
-                st.rerun()
-            except Exception:
-                st.error("No fue posible iniciar sesión. Verifica el correo y la contraseña.")
+            except Exception as exc:
+                st.error(f"La contraseña fue aceptada, pero falló la consulta de autorización: {exc}")
+                return
+            if not profile or not profile.get("activo"):
+                public_client().auth.sign_out()
+                st.session_state.pop("access_token", None)
+                st.error("La contraseña fue aceptada, pero tu acceso no está autorizado o está suspendido.")
+                return
+            st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id),
+                                     "nombre": profile.get("nombre") or auth.user.email,
+                                     "rol": profile.get("rol", "usuario")}
+            register_access(user_client)
+            st.rerun()
 
 
 def landing():
