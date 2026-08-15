@@ -155,8 +155,9 @@ def login():
                 st.error("La cuenta no pertenece al dominio autorizado.")
                 return
             st.session_state.access_token = auth.session.access_token
+            st.session_state.refresh_token = auth.session.refresh_token
             try:
-                user_client = client_with_token(auth.session.access_token)
+                user_client = client_with_token(auth.session.access_token, auth.session.refresh_token)
                 profile = access_profile(user_client, auth.user.email)
             except Exception as exc:
                 st.error(f"La contraseña fue aceptada, pero falló la consulta de autorización: {exc}")
@@ -164,6 +165,7 @@ def login():
             if not profile or not profile.get("activo"):
                 public_client().auth.sign_out()
                 st.session_state.pop("access_token", None)
+                st.session_state.pop("refresh_token", None)
                 st.error("La contraseña fue aceptada, pero tu acceso no está autorizado o está suspendido.")
                 return
             st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id),
@@ -382,7 +384,7 @@ def project_form(direction: str, project=None):
             st.json(payload)
             return
         try:
-            client = client_with_token(st.session_state.access_token)
+            client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
             if project:
                 result = client.table("proyectos").update(payload).eq("id", project["id"]).execute()
             else:
@@ -537,7 +539,7 @@ def view_active_projects(direction: str):
     if not configured():
         st.info("La visualización de proyectos estará disponible al conectar Supabase.")
         return
-    client = client_with_token(st.session_state.access_token)
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     rows = client.table("proyectos").select("*").eq("direccion", direction).order("updated_at", desc=True).execute().data
     active = [project for project in rows or [] if project_is_active(project)]
     selected_id = st.session_state.get("view_project_id")
@@ -578,7 +580,7 @@ def user_management():
     if st.session_state.user.get("rol") != "administrador":
         st.error("No tienes permisos para acceder a este módulo.")
         return
-    client = client_with_token(st.session_state.access_token)
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     create_tab, users_tab = st.tabs(["Generar código temporal", "Usuarios autorizados"])
     with create_tab:
         st.markdown("### Autorizar a una persona")
@@ -714,7 +716,7 @@ def programs():
         st.info("La consulta y edición estarán disponibles al conectar Supabase.")
     else:
         try:
-            client = client_with_token(st.session_state.access_token)
+            client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
             rows = client.table("proyectos").select("*").eq("direccion", direction).order("updated_at", desc=True).execute().data
             if not rows:
                 st.info("Todavía no hay proyectos registrados en esta dirección.")

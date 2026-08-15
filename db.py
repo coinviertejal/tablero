@@ -24,10 +24,10 @@ def public_client() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], public_key())
 
 
-def client_with_token(access_token: str) -> Client:
+def client_with_token(access_token: str, refresh_token: str) -> Client:
+    """Crea un cliente completo que actúa con la sesión del usuario."""
     client = create_client(st.secrets["SUPABASE_URL"], public_key())
-    client.postgrest.auth(access_token)
-    client.storage.set_auth(access_token)
+    client.auth.set_session(access_token, refresh_token)
     return client
 
 
