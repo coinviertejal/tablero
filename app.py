@@ -959,6 +959,15 @@ def _agreement_code(session: dict, consecutive: int) -> str:
     return f"JG-{int(session.get('anio'))}-{kind}-{_session_number(session.get('nombre')):02d}-{consecutive:03d}"
 
 
+def _next_agreement_number(session: dict, rows: list[dict]) -> str:
+    consecutives = []
+    for row in rows:
+        match = re.search(r"-(\d{3})$", row.get("numero") or "")
+        if match:
+            consecutives.append(int(match.group(1)))
+    return _agreement_code(session, max(consecutives, default=0) + 1)
+
+
 def _deadline_label(value, status: str) -> str:
     if not value: return "Sin fecha compromiso"
     days = (date.fromisoformat(str(value)[:10]) - date.today()).days
@@ -1036,7 +1045,7 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption("Versión Junta de Gobierno corregida · 17/08/2026")
+    st.caption("Versión Junta Documentos V2 · 17/08/2026")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     session_date = st.date_input("Fecha de la sesión", value=date.fromisoformat(session["fecha_sesion"][:10]) if session.get("fecha_sesion") else None,
@@ -1054,10 +1063,28 @@ def board_session_detail(session: dict):
         client.table("sesiones_junta").update({"videograbacion_url": video_url.strip() or None}).eq("id", session["id"]).execute()
         st.session_state.board_session["videograbacion_url"] = video_url.strip() or None
         st.success("URL de la videograbación guardada.")
+    if uploaded and (uploaded.type == "application/pdf" or uploaded.name.lower().endswith(".pdf")):
+        with media1.expander("Previsualizar convocatoria"):
+            _pdf_preview(uploaded.getvalue(), 480)
+    if signed_minutes:
+        with media2.expander("Previsualizar acta"):
+            _pdf_preview(signed_minutes.getvalue(), 480)
+    if uploaded and media1.button("Guardar convocatoria", key=f"save_notice_{session['id']}", use_container_width=True):
+        path = f"junta/{session['id']}/documentos/{uuid.uuid4().hex}_{Path(uploaded.name).name}"
+        client.storage.from_("expedientes").upload(path, uploaded.getvalue(), {"content-type": uploaded.type or "application/octet-stream"})
+        client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Convocatoria / orden del día",
+            "nombre_visible": Path(uploaded.name).stem, "nombre_archivo": uploaded.name, "ruta_storage": path,
+            "mime_type": uploaded.type, "tamano_bytes": uploaded.size, "subido_por": st.session_state.user["id"],
+            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
+        st.success("Convocatoria guardada."); st.rerun()
     if signed_minutes and media2.button("Guardar acta firmada", key=f"save_minutes_{session['id']}", use_container_width=True):
         path = f"junta/{session['id']}/acta_firmada/{uuid.uuid4().hex}_{Path(signed_minutes.name).name}"
         client.storage.from_("expedientes").upload(path, signed_minutes.getvalue(), {"content-type": signed_minutes.type or "application/pdf"})
         client.table("sesiones_junta").update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path}).eq("id", session["id"]).execute()
+        client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Acta firmada",
+            "nombre_visible": Path(signed_minutes.name).stem, "nombre_archivo": signed_minutes.name, "ruta_storage": path,
+            "mime_type": signed_minutes.type, "tamano_bytes": signed_minutes.size, "subido_por": st.session_state.user["id"],
+            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
         st.session_state.board_session.update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path})
         st.success("Acta firmada guardada.")
     if session.get("acta_firmada_ruta"):
@@ -1068,9 +1095,6 @@ def board_session_detail(session: dict):
                                    key=f"download_minutes_{session['id']}", use_container_width=True)
         except Exception:
             media2.caption("El acta está registrada, pero no pudo descargarse.")
-    if uploaded and (uploaded.type == "application/pdf" or uploaded.name.lower().endswith(".pdf")):
-        with st.expander("Previsualizar convocatoria PDF"):
-            _pdf_preview(uploaded.getvalue())
     if uploaded and st.button("Analizar y separar puntos", type="primary", use_container_width=True):
         try:
             text = _extract_board_text(uploaded)
@@ -1104,6 +1128,21 @@ def board_session_detail(session: dict):
                     "estatus": "Por iniciar", "fecha_compromiso": None})
             if payload:
                 client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
+    session_documents = client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"]).order("created_at").execute().data or []
+    if session_documents:
+        st.markdown("#### Documentos de la sesión")
+        for document in session_documents:
+            st.markdown(f"**{html.escape(document.get('nombre_visible') or document.get('nombre_archivo') or 'Documento')}**  ")
+            st.caption(f"{document.get('tipo_documento')} · Subido por {document.get('autor_nombre') or 'Usuario'} · {str(document.get('created_at') or '')[:16]}")
+            try:
+                document_data = client.storage.from_("expedientes").download(document["ruta_storage"])
+                if document.get("mime_type") == "application/pdf" or document.get("nombre_archivo", "").lower().endswith(".pdf"):
+                    with st.expander("Previsualizar PDF", expanded=False):
+                        _pdf_preview(document_data)
+                st.download_button("Descargar documento", document_data, file_name=document.get("nombre_archivo") or "documento",
+                                   mime=document.get("mime_type") or "application/octet-stream", key=f"session_doc_{document['id']}")
+            except Exception:
+                st.caption("No fue posible cargar la previsualización.")
     st.divider()
     rows = client.table("acuerdos_junta").select("*").eq("sesion_id", session["id"]).order("numero").execute().data or []
     rows = [row for row in rows if not re.search(r"clausura(?:\s+de)?\s+la\s+sesi[oó]n|asuntos\s+varios", row.get("titulo") or "", re.I)]
@@ -1113,8 +1152,8 @@ def board_session_detail(session: dict):
         is_report = (row.get("tipo_registro") == "Informe")
         status = row.get("estatus") or "Por iniciar"; color = {"Por iniciar": "red", "En proceso": "yellow", "Terminada": "green"}.get(status, "gray")
         areas = ", ".join(row.get("areas") or []) or "Sin responsable"
-        status_dot = {"Por iniciar": "🔴", "En proceso": "🟡", "Terminada": "🟢"}.get(status, "⚪")
-        with st.expander(f"{status_dot} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
+        status_ribbon = {"Por iniciar": ":red[▌]", "En proceso": ":orange[▌]", "Terminada": ":green[▌]"}.get(status, ":gray[▌]")
+        with st.expander(f"{status_ribbon} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
             summary_status = "En progreso" if status == "En proceso" else status
             summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
@@ -1160,18 +1199,26 @@ def board_session_detail(session: dict):
             if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
                 save_follow_up()
             files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}")
+            visible_names = {}
+            for file_index, item in enumerate(files or []):
+                visible_names[item.name] = st.text_input(f"Nombre descriptivo · {item.name}", value=Path(item.name).stem,
+                                                         key=f"file_title_{row['id']}_{file_index}")
             if files and st.button("Subir archivos", key=f"upload_{row['id']}"):
                 records = []
                 for item in files:
                     path = f"junta/{session['id']}/{row['id']}/{uuid.uuid4().hex}_{Path(item.name).name}"
                     client.storage.from_("expedientes").upload(path, item.getvalue(), {"content-type": item.type or "application/octet-stream"})
-                    records.append({"acuerdo_id": row["id"], "nombre_archivo": item.name, "ruta_storage": path, "mime_type": item.type,
-                                    "tamano_bytes": item.size, "subido_por": st.session_state.user["id"]})
-                client.table("archivos_acuerdo").insert(records).execute(); st.success("Archivos adjuntados.")
+                    records.append({"acuerdo_id": row["id"], "nombre_visible": visible_names.get(item.name) or Path(item.name).stem,
+                                    "nombre_archivo": item.name, "ruta_storage": path, "mime_type": item.type,
+                                    "tamano_bytes": item.size, "subido_por": st.session_state.user["id"],
+                                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")})
+                client.table("archivos_acuerdo").insert(records).execute(); st.success("Archivos adjuntados."); st.rerun()
             stored_files = client.table("archivos_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
             for stored in stored_files:
                 try:
                     content = client.storage.from_("expedientes").download(stored["ruta_storage"])
+                    st.markdown(f"**{html.escape(stored.get('nombre_visible') or stored['nombre_archivo'])}**")
+                    st.caption(f"Subido por {stored.get('autor_nombre') or 'Usuario'} · {str(stored.get('created_at') or '')[:16]}")
                     st.download_button(f"Descargar · {stored['nombre_archivo']}", content, file_name=stored["nombre_archivo"],
                                        mime=stored.get("mime_type") or "application/octet-stream", key=f"download_board_{stored['id']}")
                     if (stored.get("mime_type") == "application/pdf" or stored.get("nombre_archivo", "").lower().endswith(".pdf")):
@@ -1188,6 +1235,22 @@ def board_session_detail(session: dict):
             safe_code = row.get("numero") or "acuerdo"
             d1.download_button("Descargar ficha en PDF", agreement_pdf, file_name=f"Ficha_{safe_code}.pdf", mime="application/pdf", use_container_width=True, key=f"agreement_pdf_{row['id']}")
             d2.download_button("Descargar ficha en Word", agreement_docx, file_name=f"Ficha_{safe_code}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, key=f"agreement_docx_{row['id']}")
+    st.markdown("### Agregar acuerdo manualmente")
+    with st.expander("＋ Agregar acuerdo que no fue detectado"):
+        with st.form(f"manual_agreement_{session['id']}", clear_on_submit=True):
+            manual_type = st.selectbox("Tipo", ["Acuerdo", "Informe"])
+            manual_title = st.text_input("Nombre del punto")
+            manual_text = st.text_area("Texto o descripción")
+            save_manual = st.form_submit_button("Agregar a la sesión", type="primary", use_container_width=True)
+        if save_manual:
+            if not manual_title.strip():
+                st.error("Escribe el nombre del punto.")
+            else:
+                all_rows = client.table("acuerdos_junta").select("numero").eq("sesion_id", session["id"]).execute().data or []
+                client.table("acuerdos_junta").insert({"sesion_id": session["id"], "numero": _next_agreement_number(session, all_rows),
+                    "tipo_registro": manual_type, "titulo": manual_title.strip(), "texto": manual_text.strip(), "areas": [],
+                    "estatus": "Por iniciar", "fecha_compromiso": None}).execute()
+                st.success("Acuerdo agregado."); st.rerun()
 
 
 def board_search(client, year: int, term: str):
