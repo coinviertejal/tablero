@@ -182,18 +182,46 @@ create table if not exists public.sesiones_junta (
   unique (anio, tipo, nombre)
 );
 
+-- Sólo ejercicios oficiales 2025-2030.
+delete from public.sesiones_junta where anio = 0;
+alter table public.sesiones_junta drop constraint if exists sesiones_junta_anio_check;
+alter table public.sesiones_junta add constraint sesiones_junta_anio_check
+check (anio between 2025 and 2030);
+
 create table if not exists public.acuerdos_junta (
   id uuid primary key default gen_random_uuid(),
   sesion_id uuid not null references public.sesiones_junta(id) on delete cascade,
   numero text,
   titulo text not null,
   texto text not null default '',
+  tipo_registro text not null default 'Acuerdo' check (tipo_registro in ('Acuerdo','Informe')),
+  areas jsonb not null default '[]'::jsonb,
+  estatus text not null default 'Por iniciar' check (estatus in ('Por iniciar','En proceso','Terminada')),
+  fecha_compromiso date,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
+alter table public.acuerdos_junta add column if not exists tipo_registro text not null default 'Acuerdo';
+alter table public.acuerdos_junta add column if not exists areas jsonb not null default '[]'::jsonb;
+alter table public.acuerdos_junta add column if not exists estatus text not null default 'Por iniciar';
+alter table public.acuerdos_junta add column if not exists fecha_compromiso date;
+
+create table if not exists public.comentarios_acuerdo (
+  id uuid primary key default gen_random_uuid(), acuerdo_id uuid not null references public.acuerdos_junta(id) on delete cascade,
+  autor_id uuid not null references auth.users(id), autor_nombre text not null, comentario text not null,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.archivos_acuerdo (
+  id uuid primary key default gen_random_uuid(), acuerdo_id uuid not null references public.acuerdos_junta(id) on delete cascade,
+  nombre_archivo text not null, ruta_storage text not null unique, mime_type text, tamano_bytes bigint not null,
+  subido_por uuid not null references auth.users(id), created_at timestamptz not null default now()
+);
+
 alter table public.sesiones_junta enable row level security;
 alter table public.acuerdos_junta enable row level security;
+alter table public.comentarios_acuerdo enable row level security;
+alter table public.archivos_acuerdo enable row level security;
 drop policy if exists "usuarios consultan sesiones junta" on public.sesiones_junta;
 drop policy if exists "usuarios crean sesiones junta" on public.sesiones_junta;
 drop policy if exists "usuarios actualizan sesiones junta" on public.sesiones_junta;
@@ -212,6 +240,14 @@ create policy "usuarios crean acuerdos junta" on public.acuerdos_junta for inser
 with check (public.esta_autorizado());
 create policy "usuarios actualizan acuerdos junta" on public.acuerdos_junta for update to authenticated
 using (public.esta_autorizado()) with check (public.esta_autorizado());
+drop policy if exists "usuarios consultan comentarios junta" on public.comentarios_acuerdo;
+drop policy if exists "usuarios crean comentarios junta" on public.comentarios_acuerdo;
+create policy "usuarios consultan comentarios junta" on public.comentarios_acuerdo for select to authenticated using (public.esta_autorizado());
+create policy "usuarios crean comentarios junta" on public.comentarios_acuerdo for insert to authenticated with check (public.esta_autorizado() and autor_id=auth.uid());
+drop policy if exists "usuarios consultan archivos junta" on public.archivos_acuerdo;
+drop policy if exists "usuarios crean archivos junta" on public.archivos_acuerdo;
+create policy "usuarios consultan archivos junta" on public.archivos_acuerdo for select to authenticated using (public.esta_autorizado());
+create policy "usuarios crean archivos junta" on public.archivos_acuerdo for insert to authenticated with check (public.esta_autorizado() and subido_por=auth.uid());
 
 create index if not exists acuerdos_junta_busqueda_idx
 on public.acuerdos_junta using gin (to_tsvector('spanish', coalesce(numero,'') || ' ' || titulo || ' ' || texto));

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import base64
 import html
+import io
 from pathlib import Path
+import re
 import uuid
 
 import pandas as pd
 import streamlit as st
+from docx import Document
+from pptx import Presentation
+from pypdf import PdfReader
+import fitz
+import pytesseract
+from PIL import Image
 
 from data import MUNICIPIOS_JALISCO
 from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
@@ -786,6 +794,11 @@ def user_management():
 
 BOARD_YEARS = [2025, 2026, 2027, 2028, 2029, 2030]
 PRESET_BOARD_SESSIONS = ["Primera (1era)", "Segunda (2da)", "Tercera (3ra)"]
+BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Operaciones", "Dirección de Planeación"]
+
+
+def board_year_label(year: int) -> str:
+    return str(year)
 
 
 def board_year_selector():
@@ -797,21 +810,169 @@ def board_year_selector():
         columns = st.columns(3, gap="large")
         for column, year, color in zip(columns, BOARD_YEARS[start:start + 3], colors[start:start + 3]):
             with column:
-                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p>Sesiones y acuerdos</p></div>', unsafe_allow_html=True)
-                if st.button(f"Abrir {year}", key=f"board_year_{year}", use_container_width=True, type="primary"):
+                label = board_year_label(year)
+                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2>{label}</h2><p>Sesiones y acuerdos</p></div>', unsafe_allow_html=True)
+                if st.button(f"Abrir {label}", key=f"board_year_{year}", use_container_width=True, type="primary"):
                     st.session_state.board_year = year
                     st.session_state.pop("board_session", None)
                     st.rerun()
+def _extract_board_text(uploaded) -> str:
+    data = uploaded.getvalue()
+    suffix = Path(uploaded.name).suffix.lower()
+    if suffix == ".docx":
+        doc = Document(io.BytesIO(data))
+        blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        blocks += [" ".join(c.text.strip() for c in row.cells if c.text.strip()) for table in doc.tables for row in table.rows]
+        return "\n".join(blocks)
+    if suffix == ".pptx":
+        prs = Presentation(io.BytesIO(data))
+        return "\n".join(shape.text.strip() for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip())
+    if suffix == ".pdf":
+        text = "\n".join((page.extract_text() or "").strip() for page in PdfReader(io.BytesIO(data)).pages).strip()
+        if len(text) >= 80:
+            return text
+        pdf = fitz.open(stream=data, filetype="pdf")
+        pages = []
+        for page in pdf:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            image = Image.open(io.BytesIO(pix.tobytes("png")))
+            pages.append(pytesseract.image_to_string(image, lang="spa"))
+        return "\n".join(pages).strip()
+    raise ValueError("Formato no compatible.")
 
 
-def board_session_stub(session: dict):
+def _board_items_from_text(text: str) -> list[dict]:
+    lines = [re.sub(r"\s+", " ", line).strip(" •\t") for line in re.sub(r"\r", "", text or "").split("\n")]
+    lines = [line for line in lines if line]
+    start = next((i for i, line in enumerate(lines) if re.search(r"aprobaci[oó]n.{0,20}orden.{0,12}d[ií]a", line, re.I)), -1)
+    if start < 0:
+        first_substantive = next((i for i, line in enumerate(lines) if re.search(r"presentaci[oó]n|\binforme\b", line, re.I)), -1)
+        start = first_substantive - 1 if first_substantive >= 0 else -1
+    end = next((i for i, line in enumerate(lines) if i > start and re.search(r"\basuntos\s+varios\b", line, re.I)), len(lines))
+    body, items, current = (lines[start + 1:end] if start >= 0 else []), [], ""
+    for line in body:
+        marker = re.match(r"^(?:punto\s+)?(?:\d+[.)-]|[IVXLCDM]+[.)-])\s*(.+)$", line, re.I)
+        begins = bool(marker or re.search(r"\b(presentaci[oó]n|informe)\b", line, re.I))
+        if begins:
+            if current: items.append(current.strip())
+            current = marker.group(1).strip() if marker else line
+        elif current:
+            current += " " + line
+    if current: items.append(current.strip())
+    results = []
+    for item in items:
+        if re.search(r"(lista de asistencia|declaraci[oó]n de qu[oó]rum|lectura del acta)", item, re.I): continue
+        is_report = bool(re.search(r"\binforme\b", item, re.I)) and not bool(re.search(r"aprobaci[oó]n", item, re.I))
+        results.append({"tipo_registro": "Informe" if is_report else "Acuerdo", "titulo": item, "texto": item,
+                        "areas": [], "estatus": "Por iniciar", "fecha_compromiso": None})
+    return results
+
+
+def _session_number(name: str) -> int:
+    match = re.search(r"(\d+)\s*(?:era|da|ra|ta|ma|va|na)?", name or "", re.I)
+    if match: return int(match.group(1))
+    words = {"primera": 1, "segunda": 2, "tercera": 3, "cuarta": 4, "quinta": 5, "sexta": 6,
+             "séptima": 7, "septima": 7, "octava": 8, "novena": 9, "décima": 10, "decima": 10}
+    low = (name or "").lower()
+    return next((number for word, number in words.items() if word in low), 0)
+
+
+def _agreement_code(session: dict, consecutive: int) -> str:
+    kind = "ORD" if session.get("tipo") == "Ordinaria" else "EXT"
+    return f"JG-{int(session.get('anio'))}-{kind}-{_session_number(session.get('nombre')):02d}-{consecutive:03d}"
+
+
+def _deadline_label(value, status: str) -> str:
+    if not value: return "Sin fecha compromiso"
+    days = (date.fromisoformat(str(value)[:10]) - date.today()).days
+    if status != "Terminada" and days < 0: return f"Vencida hace {abs(days)} día(s)"
+    if days == 0: return "Vence hoy"
+    if days > 0: return f"Faltan {days} día(s)"
+    return "Terminada"
+
+
+def board_session_detail(session: dict):
     year = st.session_state.board_year
-    if st.button(f"← Volver a sesiones de {year}"):
+    year_label = board_year_label(int(year))
+    if st.button(f"← Volver a sesiones de {year_label}"):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption(f"{session.get('tipo')} · Junta de Gobierno {year}")
-    st.info("La interfaz interna de esta sesión se construirá en la siguiente etapa.")
+    st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+    uploaded = st.file_uploader("Convocatoria u orden del día", type=["docx", "pptx", "pdf"], key=f"board_ingest_{session['id']}")
+    if uploaded and st.button("Analizar y separar puntos", type="primary", use_container_width=True):
+        try:
+            text = _extract_board_text(uploaded)
+            if not text.strip(): st.error("El documento no contiene texto seleccionable. Si es un PDF escaneado, conviértelo a PDF con OCR o súbelo en Word.")
+            else: st.session_state[f"board_draft_{session['id']}"] = _board_items_from_text(text)
+        except Exception as exc: st.error(f"No fue posible leer el archivo: {exc}")
+    draft_key = f"board_draft_{session['id']}"
+    if draft_key in st.session_state:
+        st.markdown("#### Revisión antes de guardar")
+        edited = st.data_editor(pd.DataFrame(st.session_state[draft_key]), use_container_width=True, hide_index=True, num_rows="dynamic",
+            column_config={"tipo_registro": st.column_config.SelectboxColumn("Tipo", options=["Acuerdo", "Informe"], required=True),
+                           "titulo": st.column_config.TextColumn("Punto del orden del día", width="large", required=True),
+                           "texto": st.column_config.TextColumn("Texto / descripción", width="large"),
+                           "areas": st.column_config.MultiselectColumn("Áreas responsables", options=BOARD_AREAS),
+                           "estatus": st.column_config.SelectboxColumn("Estatus", options=["Por iniciar", "En proceso", "Terminada"]),
+                           "fecha_compromiso": st.column_config.DateColumn("Fecha compromiso")}, key=f"board_draft_editor_{session['id']}")
+        if st.button("Guardar filas en la sesión", type="primary", use_container_width=True):
+            existing = client.table("acuerdos_junta").select("id").eq("sesion_id", session["id"]).execute().data or []
+            payload = []
+            for offset, row in enumerate(edited.to_dict("records"), len(existing) + 1):
+                if not str(row.get("titulo") or "").strip(): continue
+                payload.append({"sesion_id": session["id"], "numero": _agreement_code(session, offset), "tipo_registro": row.get("tipo_registro") or "Acuerdo",
+                    "titulo": str(row["titulo"]).strip(), "texto": str(row.get("texto") or "").strip(), "areas": row.get("areas") or [],
+                    "estatus": row.get("estatus") or "Por iniciar", "fecha_compromiso": str(row["fecha_compromiso"])[:10] if row.get("fecha_compromiso") else None})
+            if payload:
+                client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
+    st.divider()
+    rows = client.table("acuerdos_junta").select("*").eq("sesion_id", session["id"]).order("created_at").execute().data or []
+    st.markdown(f"### Acuerdos e informes ({len(rows)})")
+    if not rows: st.info("Esta sesión todavía no tiene puntos registrados.")
+    for row in rows:
+        is_report = (row.get("tipo_registro") == "Informe")
+        status = row.get("estatus") or "Por iniciar"; color = {"Por iniciar": "red", "En proceso": "yellow", "Terminada": "green"}.get(status, "gray")
+        areas = ", ".join(row.get("areas") or []) or "Sin responsable"
+        with st.expander(f"{row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
+            summary = areas if is_report else f"{status} · {areas}"
+            st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
+            if not is_report: st.caption(f"_{_deadline_label(row.get('fecha_compromiso'), status)}_")
+            if row.get("texto"): st.write(row["texto"])
+            c1, c2, c3 = st.columns([2, 1, 1])
+            new_areas = c1.multiselect("Áreas responsables", BOARD_AREAS, default=row.get("areas") or [], key=f"areas_{row['id']}")
+            statuses = ["Por iniciar", "En proceso", "Terminada"]
+            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), key=f"status_{row['id']}")
+            new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
+            if st.button("Guardar seguimiento", key=f"save_follow_{row['id']}"):
+                client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "fecha_compromiso": new_date.isoformat() if new_date else None,
+                    "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute(); st.rerun()
+            comments = client.table("comentarios_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
+            for comment in comments:
+                st.markdown(f"**{html.escape(comment.get('autor_nombre') or 'Usuario')}** · {str(comment.get('created_at') or '')[:16]}"); st.write(comment.get("comentario"))
+            with st.form(f"comment_{row['id']}", clear_on_submit=True):
+                comment_text = st.text_area("Agregar comentario"); add_comment = st.form_submit_button("Publicar comentario")
+            if add_comment and comment_text.strip():
+                client.table("comentarios_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
+                    "autor_nombre": st.session_state.profile.get("nombre") or st.session_state.user.get("email"), "comentario": comment_text.strip()}).execute(); st.rerun()
+            files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}")
+            if files and st.button("Subir archivos", key=f"upload_{row['id']}"):
+                records = []
+                for item in files:
+                    path = f"junta/{session['id']}/{row['id']}/{uuid.uuid4().hex}_{Path(item.name).name}"
+                    client.storage.from_("expedientes").upload(path, item.getvalue(), {"content-type": item.type or "application/octet-stream"})
+                    records.append({"acuerdo_id": row["id"], "nombre_archivo": item.name, "ruta_storage": path, "mime_type": item.type,
+                                    "tamano_bytes": item.size, "subido_por": st.session_state.user["id"]})
+                client.table("archivos_acuerdo").insert(records).execute(); st.success("Archivos adjuntados.")
+            stored_files = client.table("archivos_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
+            for stored in stored_files:
+                try:
+                    content = client.storage.from_("expedientes").download(stored["ruta_storage"])
+                    st.download_button(f"Descargar · {stored['nombre_archivo']}", content, file_name=stored["nombre_archivo"],
+                                       mime=stored.get("mime_type") or "application/octet-stream", key=f"download_board_{stored['id']}")
+                except Exception:
+                    st.caption(f"Archivo: {stored['nombre_archivo']}")
 
 
 def board_search(client, year: int, term: str):
@@ -828,7 +989,7 @@ def board_search(client, year: int, term: str):
                 .or_(f"titulo.ilike.%{term.strip()}%,texto.ilike.%{term.strip()}%,numero.ilike.%{term.strip()}%")
                 .execute().data or [])
         if not rows:
-            st.info(f'No se encontraron acuerdos con “{term.strip()}” en {year}.')
+            st.info(f'No se encontraron acuerdos con “{term.strip()}” en {board_year_label(year)}.')
             return
         for row in rows:
             session = row.get("sesiones_junta") or {}
@@ -845,7 +1006,8 @@ def board_year_dashboard(year: int):
         st.session_state.pop("board_year", None)
         st.session_state.pop("board_session", None)
         st.rerun()
-    top2.markdown(f"## Junta de Gobierno · {year}")
+    year_label = board_year_label(year)
+    top2.markdown(f"## Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
     term = st.text_input("Buscar acuerdos por palabra clave", placeholder="Ej. convenio, presupuesto, inmueble, municipio…", key=f"board_search_{year}")
     board_search(client, year, term)
@@ -895,8 +1057,8 @@ def board_year_dashboard(year: int):
 
 def board_government():
     if st.session_state.get("board_session"):
-        board_session_stub(st.session_state.board_session)
-    elif st.session_state.get("board_year"):
+        board_session_detail(st.session_state.board_session)
+    elif "board_year" in st.session_state:
         board_year_dashboard(int(st.session_state.board_year))
     else:
         board_year_selector()
