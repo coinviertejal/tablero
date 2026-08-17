@@ -6,6 +6,8 @@ import html
 import io
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import uuid
 
 import pandas as pd
@@ -978,8 +980,33 @@ def _deadline_label(value, status: str) -> str:
 
 
 def _pdf_preview(data: bytes, height: int = 650):
+    if hasattr(st, "pdf"):
+        st.pdf(data, height=height)
+        return
     encoded = base64.b64encode(data).decode("ascii")
-    components.html(f'<embed src="data:application/pdf;base64,{encoded}" type="application/pdf" width="100%" height="{height}px" style="border:1px solid #dfe7e9;border-radius:10px">', height=height + 12)
+    components.html(f'<iframe src="data:application/pdf;base64,{encoded}" width="100%" height="{height}px" style="border:1px solid #dfe7e9;border-radius:10px"></iframe>', height=height + 12)
+
+
+def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        _pdf_preview(data, height)
+        return True
+    if suffix not in (".docx", ".pptx"):
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / Path(filename).name
+            source.write_bytes(data)
+            result = subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", folder, str(source)],
+                                    capture_output=True, timeout=90, check=False)
+            converted = source.with_suffix(".pdf")
+            if result.returncode != 0 or not converted.exists():
+                return False
+            _pdf_preview(converted.read_bytes(), height)
+            return True
+    except Exception:
+        return False
 
 
 def _agreement_ficha_docx(agreement: dict, session: dict, comments: list, history: list, files: list) -> bytes:
@@ -1045,7 +1072,7 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption("Versión Junta Documentos V2 · 17/08/2026")
+    st.caption("Versión Junta Documentos V3 · visor corregido")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     session_date = st.date_input("Fecha de la sesión", value=date.fromisoformat(session["fecha_sesion"][:10]) if session.get("fecha_sesion") else None,
@@ -1063,12 +1090,13 @@ def board_session_detail(session: dict):
         client.table("sesiones_junta").update({"videograbacion_url": video_url.strip() or None}).eq("id", session["id"]).execute()
         st.session_state.board_session["videograbacion_url"] = video_url.strip() or None
         st.success("URL de la videograbación guardada.")
-    if uploaded and (uploaded.type == "application/pdf" or uploaded.name.lower().endswith(".pdf")):
+    if uploaded:
         with media1.expander("Previsualizar convocatoria"):
-            _pdf_preview(uploaded.getvalue(), 480)
+            if not _document_preview(uploaded.getvalue(), uploaded.name, 480):
+                st.info("La vista previa no está disponible para este formato.")
     if signed_minutes:
         with media2.expander("Previsualizar acta"):
-            _pdf_preview(signed_minutes.getvalue(), 480)
+            _document_preview(signed_minutes.getvalue(), signed_minutes.name, 480)
     if uploaded and media1.button("Guardar convocatoria", key=f"save_notice_{session['id']}", use_container_width=True):
         path = f"junta/{session['id']}/documentos/{uuid.uuid4().hex}_{Path(uploaded.name).name}"
         client.storage.from_("expedientes").upload(path, uploaded.getvalue(), {"content-type": uploaded.type or "application/octet-stream"})
@@ -1136,9 +1164,9 @@ def board_session_detail(session: dict):
             st.caption(f"{document.get('tipo_documento')} · Subido por {document.get('autor_nombre') or 'Usuario'} · {str(document.get('created_at') or '')[:16]}")
             try:
                 document_data = client.storage.from_("expedientes").download(document["ruta_storage"])
-                if document.get("mime_type") == "application/pdf" or document.get("nombre_archivo", "").lower().endswith(".pdf"):
-                    with st.expander("Previsualizar PDF", expanded=False):
-                        _pdf_preview(document_data)
+                with st.expander("Previsualizar documento", expanded=False):
+                    if not _document_preview(document_data, document.get("nombre_archivo") or "documento", 650):
+                        st.info("La vista previa no está disponible para este formato.")
                 st.download_button("Descargar documento", document_data, file_name=document.get("nombre_archivo") or "documento",
                                    mime=document.get("mime_type") or "application/octet-stream", key=f"session_doc_{document['id']}")
             except Exception:
@@ -1196,13 +1224,13 @@ def board_session_detail(session: dict):
                     st.rerun()
                 except Exception as exc:
                     st.error(f"No fue posible publicar el comentario: {exc}")
-            if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
-                save_follow_up()
-            files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}")
+            upload_nonce_key = f"upload_nonce_{row['id']}"
+            upload_nonce = st.session_state.get(upload_nonce_key, 0)
+            files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}_{upload_nonce}")
             visible_names = {}
             for file_index, item in enumerate(files or []):
                 visible_names[item.name] = st.text_input(f"Nombre descriptivo · {item.name}", value=Path(item.name).stem,
-                                                         key=f"file_title_{row['id']}_{file_index}")
+                                                         key=f"file_title_{row['id']}_{upload_nonce}_{file_index}")
             if files and st.button("Subir archivos", key=f"upload_{row['id']}"):
                 records = []
                 for item in files:
@@ -1212,7 +1240,9 @@ def board_session_detail(session: dict):
                                     "nombre_archivo": item.name, "ruta_storage": path, "mime_type": item.type,
                                     "tamano_bytes": item.size, "subido_por": st.session_state.user["id"],
                                     "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")})
-                client.table("archivos_acuerdo").insert(records).execute(); st.success("Archivos adjuntados."); st.rerun()
+                client.table("archivos_acuerdo").insert(records).execute()
+                st.session_state[upload_nonce_key] = upload_nonce + 1
+                st.success("Archivos adjuntados."); st.rerun()
             stored_files = client.table("archivos_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
             for stored in stored_files:
                 try:
@@ -1221,11 +1251,13 @@ def board_session_detail(session: dict):
                     st.caption(f"Subido por {stored.get('autor_nombre') or 'Usuario'} · {str(stored.get('created_at') or '')[:16]}")
                     st.download_button(f"Descargar · {stored['nombre_archivo']}", content, file_name=stored["nombre_archivo"],
                                        mime=stored.get("mime_type") or "application/octet-stream", key=f"download_board_{stored['id']}")
-                    if (stored.get("mime_type") == "application/pdf" or stored.get("nombre_archivo", "").lower().endswith(".pdf")):
-                        with st.expander(f"Previsualizar PDF · {stored['nombre_archivo']}"):
-                            _pdf_preview(content)
+                    with st.expander(f"Previsualizar · {stored['nombre_archivo']}"):
+                        if not _document_preview(content, stored["nombre_archivo"], 650):
+                            st.info("La vista previa no está disponible para este formato.")
                 except Exception:
                     st.caption(f"Archivo: {stored['nombre_archivo']}")
+            if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
+                save_follow_up()
             st.markdown("#### Ficha del acuerdo")
             agreement_docx = _agreement_ficha_docx(row, session, comments, history, stored_files)
             agreement_pdf = _agreement_ficha_pdf(row, session, comments, history, stored_files)
