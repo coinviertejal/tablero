@@ -980,11 +980,27 @@ def _deadline_label(value, status: str) -> str:
 
 
 def _pdf_preview(data: bytes, height: int = 650):
-    if hasattr(st, "pdf"):
-        st.pdf(data, height=height)
-        return
-    encoded = base64.b64encode(data).decode("ascii")
-    components.html(f'<iframe src="data:application/pdf;base64,{encoded}" width="100%" height="{height}px" style="border:1px solid #dfe7e9;border-radius:10px"></iframe>', height=height + 12)
+    """Muestra el PDF como páginas renderizadas sin depender de st.pdf.
+
+    El componente PDF nativo puede fallar en Streamlit Cloud por diferencias
+    entre la versión del frontend y el complemento instalado. PyMuPDF ya forma
+    parte del proyecto y produce una vista previa estable en todos los casos.
+    """
+    try:
+        document = fitz.open(stream=data, filetype="pdf")
+        if document.page_count == 0:
+            st.info("El PDF no contiene páginas para previsualizar.")
+            return
+        for page_number, page in enumerate(document, start=1):
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+            st.image(
+                pixmap.tobytes("png"),
+                caption=f"Página {page_number} de {document.page_count}",
+                use_container_width=True,
+            )
+        document.close()
+    except Exception:
+        st.info("No fue posible generar la vista previa de este PDF. Puedes descargarlo para consultarlo.")
 
 
 def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
