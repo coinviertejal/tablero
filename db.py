@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from pathlib import Path
 
@@ -24,11 +25,30 @@ def public_client() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], public_key())
 
 
+@st.cache_resource(ttl=1800, show_spinner=False)
 def client_with_token(access_token: str, refresh_token: str) -> Client:
-    """Crea un cliente completo que actúa con la sesión del usuario."""
-    client = create_client(st.secrets["SUPABASE_URL"], public_key())
-    client.auth.set_session(access_token, refresh_token)
-    return client
+    """Crea una sola vez el cliente autenticado por sesión/token.
+
+    Streamlit vuelve a ejecutar el script con cada interacción. Sin la caché,
+    ``set_session`` revalidaba los tokens contra Supabase en cada clic y una
+    demora transitoria podía derribar toda la vista de Junta de Gobierno.
+    """
+    last_error = None
+    for attempt in range(3):
+        try:
+            client = create_client(st.secrets["SUPABASE_URL"], public_key())
+            client.auth.set_session(access_token, refresh_token)
+            return client
+        except Exception as exc:
+            last_error = exc
+            if exc.__class__.__name__ not in {"ReadTimeout", "ConnectTimeout", "ConnectError"}:
+                raise
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    raise RuntimeError(
+        "Supabase tardó demasiado en validar la sesión. "
+        "La sesión no se cerró; espera unos segundos y vuelve a intentar."
+    ) from last_error
 
 
 def access_profile(client: Client, email: str) -> dict | None:
