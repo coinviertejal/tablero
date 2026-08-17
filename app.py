@@ -12,15 +12,23 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt, RGBColor
 from pptx import Presentation
 from pypdf import PdfReader
 import fitz
 import pytesseract
 from PIL import Image
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from data import MUNICIPIOS_JALISCO
 from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
-from exports import build_agreement_docx, build_agreement_pdf, build_docx, build_pdf
+from exports import build_docx, build_pdf
 
 st.set_page_config(page_title="COINVIERTE | Gestión Institucional", page_icon="🏛️", layout="wide")
 
@@ -902,6 +910,62 @@ def _pdf_preview(data: bytes, height: int = 650):
     components.html(f'<embed src="data:application/pdf;base64,{encoded}" type="application/pdf" width="100%" height="{height}px" style="border:1px solid #dfe7e9;border-radius:10px">', height=height + 12)
 
 
+def _agreement_ficha_docx(agreement: dict, session: dict, comments: list, history: list, files: list) -> bytes:
+    doc = Document(); section = doc.sections[0]
+    section.top_margin = section.bottom_margin = section.left_margin = section.right_margin = Inches(.85)
+    normal = doc.styles["Normal"]; normal.font.name = "Arial"; normal.font.size = Pt(10.5)
+    normal.paragraph_format.space_after = Pt(6)
+    logo = Path("assets/logo_coinvierte.jpeg")
+    if logo.exists():
+        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(str(logo), width=Inches(5.8))
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"{session.get('nombre','')} SESIÓN {session.get('tipo','').upper()}"); r.bold = True; r.font.size = Pt(16); r.font.color.rgb = RGBColor(53,67,75)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run(f"Junta de Gobierno · {session.get('fecha_sesion') or session.get('anio','Fecha no registrada')}").italic = True
+    p = doc.add_paragraph(); r = p.add_run(f"FICHA DE {agreement.get('titulo') or 'Punto de acuerdo'}"); r.bold = True; r.font.size = Pt(13); r.font.color.rgb = RGBColor(103,80,164)
+    def add_rows(title, rows):
+        h = doc.add_paragraph(); rr = h.add_run(title); rr.bold = True; rr.font.size = Pt(13); rr.font.color.rgb = RGBColor(103,80,164)
+        table = doc.add_table(rows=0, cols=2); table.style = "Table Grid"
+        for label, value in rows:
+            cells = table.add_row().cells; cells[0].text = str(label); cells[1].text = str(value or "Sin información")
+            cells[0].paragraphs[0].runs[0].bold = True
+    add_rows("Datos del acuerdo", [("Código",agreement.get("numero")),("Tipo",agreement.get("tipo_registro")),("Texto",agreement.get("texto") or agreement.get("titulo"))])
+    add_rows("Seguimiento", [("Responsables",", ".join(agreement.get("areas") or []) or "Sin responsable"),
+        ("Estatus","En progreso" if agreement.get("estatus")=="En proceso" else agreement.get("estatus")),
+        ("Fecha compromiso",agreement.get("fecha_compromiso")),("Fecha de cierre",agreement.get("fecha_cierre")),("Cumplimiento",agreement.get("cumplimiento"))])
+    for title, records, field in [("Historial de seguimiento",history,"descripcion"),("Comentarios",comments,"comentario")]:
+        h=doc.add_paragraph(); rr=h.add_run(title); rr.bold=True; rr.font.size=Pt(13); rr.font.color.rgb=RGBColor(7,152,207)
+        if not records: doc.add_paragraph("Sin registros.")
+        for item in records: doc.add_paragraph(f"{str(item.get('created_at') or '')[:16]} · {item.get('autor_nombre') or 'Usuario'}: {item.get(field) or ''}")
+    h=doc.add_paragraph(); rr=h.add_run("Archivos relacionados"); rr.bold=True; rr.font.size=Pt(13); rr.font.color.rgb=RGBColor(7,152,207)
+    doc.add_paragraph(", ".join(f.get("nombre_archivo","") for f in files) if files else "Sin archivos adjuntos.")
+    output=io.BytesIO(); doc.save(output); return output.getvalue()
+
+
+def _agreement_ficha_pdf(agreement: dict, session: dict, comments: list, history: list, files: list) -> bytes:
+    output=io.BytesIO(); doc=SimpleDocTemplate(output,pagesize=letter,leftMargin=.7*inch,rightMargin=.7*inch,topMargin=.55*inch,bottomMargin=.55*inch)
+    styles=getSampleStyleSheet(); body=ParagraphStyle("fb",parent=styles["BodyText"],fontSize=9.2,leading=12,textColor=colors.HexColor("#35434B"))
+    heading=ParagraphStyle("fh",parent=body,fontName="Helvetica-Bold",fontSize=13,textColor=colors.HexColor("#6750A4"),spaceBefore=10,spaceAfter=6)
+    title=ParagraphStyle("ft",parent=body,fontName="Helvetica-Bold",fontSize=15,leading=18,alignment=TA_CENTER,spaceAfter=4)
+    story=[]; logo=Path("assets/logo_coinvierte.jpeg")
+    if logo.exists(): story += [RLImage(str(logo),width=5.6*inch,height=1.08*inch),Spacer(1,6)]
+    story += [Paragraph(html.escape(f"{session.get('nombre','')} SESIÓN {session.get('tipo','').upper()}"),title),
+              Paragraph(html.escape(f"Junta de Gobierno · {session.get('fecha_sesion') or session.get('anio','Fecha no registrada')}"),ParagraphStyle("fc",parent=body,alignment=TA_CENTER,spaceAfter=12)),
+              Paragraph(html.escape(f"FICHA DE {agreement.get('titulo') or 'Punto de acuerdo'}"),heading)]
+    def add_table(rows):
+        data=[[Paragraph(html.escape(str(a)),body),Paragraph(html.escape(str(b or "Sin información")),body)] for a,b in rows]
+        t=Table(data,colWidths=[1.55*inch,5.25*inch]); t.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.3,colors.HexColor("#DDE4E6")),("BACKGROUND",(0,0),(0,-1),colors.HexColor("#F1EFF8")),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)])); story.append(t)
+    add_table([("Código",agreement.get("numero")),("Tipo",agreement.get("tipo_registro")),("Texto",agreement.get("texto") or agreement.get("titulo"))])
+    story.append(Paragraph("Seguimiento",heading)); add_table([("Responsables",", ".join(agreement.get("areas") or []) or "Sin responsable"),("Estatus","En progreso" if agreement.get("estatus")=="En proceso" else agreement.get("estatus")),("Fecha compromiso",agreement.get("fecha_compromiso")),("Fecha de cierre",agreement.get("fecha_cierre")),("Cumplimiento",agreement.get("cumplimiento"))])
+    for title_text,records,field in [("Historial de seguimiento",history,"descripcion"),("Comentarios",comments,"comentario")]:
+        story.append(Paragraph(title_text,heading))
+        if not records: story.append(Paragraph("Sin registros.",body))
+        for item in records: story.append(Paragraph(html.escape(f"{str(item.get('created_at') or '')[:16]} · {item.get('autor_nombre') or 'Usuario'}: {item.get(field) or ''}"),body))
+    story.append(Paragraph("Archivos relacionados",heading)); story.append(Paragraph(html.escape(", ".join(f.get("nombre_archivo","") for f in files) if files else "Sin archivos adjuntos."),body))
+    doc.build(story); return output.getvalue()
+
+
 def board_session_detail(session: dict):
     year = st.session_state.board_year
     year_label = board_year_label(int(year))
@@ -1026,8 +1090,8 @@ def board_session_detail(session: dict):
                 except Exception:
                     st.caption(f"Archivo: {stored['nombre_archivo']}")
             st.markdown("#### Ficha del acuerdo")
-            agreement_docx = build_agreement_docx(row, session, comments, history, stored_files, "assets/logo_coinvierte.jpeg")
-            agreement_pdf = build_agreement_pdf(row, session, comments, history, stored_files, "assets/logo_coinvierte.jpeg")
+            agreement_docx = _agreement_ficha_docx(row, session, comments, history, stored_files)
+            agreement_pdf = _agreement_ficha_pdf(row, session, comments, history, stored_files)
             with st.expander("Previsualizar ficha del acuerdo"):
                 _pdf_preview(agreement_pdf)
             d1, d2 = st.columns(2)
