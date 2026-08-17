@@ -1025,6 +1025,55 @@ def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
         return False
 
 
+def _document_card(client, document: dict, key_prefix: str, table_name: str):
+    """Tarjeta compacta con metadatos, descarga y vista previa."""
+    filename = document.get("nombre_archivo") or "documento"
+    suffix = Path(filename).suffix.upper().lstrip(".") or "ARCHIVO"
+    created = str(document.get("created_at") or "")[:16].replace("T", " · ")
+    with st.container(border=True):
+        info, actions = st.columns([4.5, 2.5], vertical_alignment="center")
+        info.markdown(f"**{html.escape(document.get('nombre_visible') or Path(filename).stem)}**")
+        info.caption(
+            f"{suffix} · {html.escape(document.get('tipo_documento') or 'Documento')}  \n"
+            f"Subido por {html.escape(document.get('autor_nombre') or 'Usuario')} · {created or 'Fecha no disponible'}"
+        )
+        try:
+            data = client.storage.from_("expedientes").download(document["ruta_storage"])
+            view_col, download_col, delete_col = actions.columns(3)
+            show_preview = view_col.toggle("Ver", key=f"{key_prefix}_view_{document['id']}")
+            download_col.download_button(
+                "Descargar", data, file_name=filename,
+                mime=document.get("mime_type") or "application/octet-stream",
+                key=f"{key_prefix}_download_{document['id']}", use_container_width=True,
+            )
+            pending_key = f"{key_prefix}_pending_delete_{document['id']}"
+            if delete_col.button("Eliminar", key=f"{key_prefix}_delete_{document['id']}", use_container_width=True):
+                st.session_state[pending_key] = True
+                st.rerun()
+            if st.session_state.get(pending_key):
+                st.warning(f"¿Eliminar definitivamente “{document.get('nombre_visible') or filename}” del expediente?")
+                confirm_col, cancel_col, _ = st.columns([1, 1, 4])
+                if confirm_col.button("Sí, eliminar", key=f"{key_prefix}_confirm_{document['id']}", type="primary"):
+                    client.storage.from_("expedientes").remove([document["ruta_storage"]])
+                    client.table(table_name).delete().eq("id", document["id"]).execute()
+                    if table_name == "documentos_sesion_junta" and document.get("tipo_documento") == "Acta firmada":
+                        client.table("sesiones_junta").update({"acta_firmada_nombre": None, "acta_firmada_ruta": None}).eq("id", document.get("sesion_id")).execute()
+                        if st.session_state.get("board_session", {}).get("id") == document.get("sesion_id"):
+                            st.session_state.board_session.update({"acta_firmada_nombre": None, "acta_firmada_ruta": None})
+                    st.session_state.pop(pending_key, None)
+                    st.success("Documento eliminado.")
+                    st.rerun()
+                if cancel_col.button("Cancelar", key=f"{key_prefix}_cancel_{document['id']}"):
+                    st.session_state.pop(pending_key, None)
+                    st.rerun()
+            if show_preview:
+                st.markdown("##### Vista previa")
+                if not _document_preview(data, filename, 650):
+                    st.info("La vista previa no está disponible para este formato.")
+        except Exception:
+            actions.caption("No fue posible abrir el archivo.")
+
+
 def _agreement_ficha_docx(agreement: dict, session: dict, comments: list, history: list, files: list) -> bytes:
     doc = Document(); section = doc.sections[0]
     section.top_margin = section.bottom_margin = section.left_margin = section.right_margin = Inches(.85)
@@ -1088,7 +1137,7 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption("Versión Junta Documentos V3 · visor corregido")
+    st.caption("Versión Junta Expediente V6 · gestión documental")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     session_date = st.date_input("Fecha de la sesión", value=date.fromisoformat(session["fecha_sesion"][:10]) if session.get("fecha_sesion") else None,
@@ -1097,8 +1146,12 @@ def board_session_detail(session: dict):
         client.table("sesiones_junta").update({"fecha_sesion": session_date.isoformat() if session_date else None}).eq("id", session["id"]).execute()
         st.session_state.board_session["fecha_sesion"] = session_date.isoformat() if session_date else None
         st.success("Fecha de la sesión guardada.")
-    media1, media2, media3 = st.columns([1.15, 1.15, 1.4])
-    uploaded = media1.file_uploader("Convocatoria u orden del día", type=["docx", "pptx", "pdf"], key=f"board_ingest_{session['id']}")
+    st.markdown("### Documentación principal de la sesión")
+    st.caption("Integra aquí los documentos generales. Todos quedarán identificados por usuario y fecha de carga.")
+    media1, media_ppt = st.columns(2)
+    uploaded = media1.file_uploader("Convocatoria u orden del día", type=["docx", "pdf"], key=f"board_ingest_{session['id']}")
+    session_ppt = media_ppt.file_uploader("Presentación de la sesión", type=["pptx"], key=f"board_presentation_{session['id']}")
+    media2, media3 = st.columns(2)
     signed_minutes = media2.file_uploader("Acta firmada", type=["pdf"], key=f"signed_minutes_{session['id']}")
     video_url = media3.text_input("URL de la videograbación", value=session.get("videograbacion_url") or "",
                                   placeholder="https://…", key=f"video_url_{session['id']}")
@@ -1113,6 +1166,10 @@ def board_session_detail(session: dict):
     if signed_minutes:
         with media2.expander("Previsualizar acta"):
             _document_preview(signed_minutes.getvalue(), signed_minutes.name, 480)
+    if session_ppt:
+        with media_ppt.expander("Previsualizar presentación"):
+            if not _document_preview(session_ppt.getvalue(), session_ppt.name, 520):
+                st.info("No fue posible convertir esta presentación para previsualizarla.")
     if uploaded and media1.button("Guardar convocatoria", key=f"save_notice_{session['id']}", use_container_width=True):
         path = f"junta/{session['id']}/documentos/{uuid.uuid4().hex}_{Path(uploaded.name).name}"
         client.storage.from_("expedientes").upload(path, uploaded.getvalue(), {"content-type": uploaded.type or "application/octet-stream"})
@@ -1121,6 +1178,14 @@ def board_session_detail(session: dict):
             "mime_type": uploaded.type, "tamano_bytes": uploaded.size, "subido_por": st.session_state.user["id"],
             "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
         st.success("Convocatoria guardada."); st.rerun()
+    if session_ppt and media_ppt.button("Guardar presentación", key=f"save_presentation_{session['id']}", use_container_width=True):
+        path = f"junta/{session['id']}/presentacion/{uuid.uuid4().hex}_{Path(session_ppt.name).name}"
+        client.storage.from_("expedientes").upload(path, session_ppt.getvalue(), {"content-type": session_ppt.type or "application/vnd.openxmlformats-officedocument.presentationml.presentation"})
+        client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Presentación de la sesión",
+            "nombre_visible": Path(session_ppt.name).stem, "nombre_archivo": session_ppt.name, "ruta_storage": path,
+            "mime_type": session_ppt.type, "tamano_bytes": session_ppt.size, "subido_por": st.session_state.user["id"],
+            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
+        st.success("Presentación guardada."); st.rerun()
     if signed_minutes and media2.button("Guardar acta firmada", key=f"save_minutes_{session['id']}", use_container_width=True):
         path = f"junta/{session['id']}/acta_firmada/{uuid.uuid4().hex}_{Path(signed_minutes.name).name}"
         client.storage.from_("expedientes").upload(path, signed_minutes.getvalue(), {"content-type": signed_minutes.type or "application/pdf"})
@@ -1174,19 +1239,9 @@ def board_session_detail(session: dict):
                 client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
     session_documents = client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"]).order("created_at").execute().data or []
     if session_documents:
-        st.markdown("#### Documentos de la sesión")
+        st.markdown(f"#### Expediente general de la sesión · {len(session_documents)} documento(s)")
         for document in session_documents:
-            st.markdown(f"**{html.escape(document.get('nombre_visible') or document.get('nombre_archivo') or 'Documento')}**  ")
-            st.caption(f"{document.get('tipo_documento')} · Subido por {document.get('autor_nombre') or 'Usuario'} · {str(document.get('created_at') or '')[:16]}")
-            try:
-                document_data = client.storage.from_("expedientes").download(document["ruta_storage"])
-                with st.expander("Previsualizar documento", expanded=False):
-                    if not _document_preview(document_data, document.get("nombre_archivo") or "documento", 650):
-                        st.info("La vista previa no está disponible para este formato.")
-                st.download_button("Descargar documento", document_data, file_name=document.get("nombre_archivo") or "documento",
-                                   mime=document.get("mime_type") or "application/octet-stream", key=f"session_doc_{document['id']}")
-            except Exception:
-                st.caption("No fue posible cargar la previsualización.")
+            _document_card(client, document, "session_doc", "documentos_sesion_junta")
     st.divider()
     rows = client.table("acuerdos_junta").select("*").eq("sesion_id", session["id"]).order("numero").execute().data or []
     rows = [row for row in rows if not re.search(r"clausura(?:\s+de)?\s+la\s+sesi[oó]n|asuntos\s+varios", row.get("titulo") or "", re.I)]
@@ -1242,36 +1297,31 @@ def board_session_detail(session: dict):
                     st.error(f"No fue posible publicar el comentario: {exc}")
             upload_nonce_key = f"upload_nonce_{row['id']}"
             upload_nonce = st.session_state.get(upload_nonce_key, 0)
-            files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}_{upload_nonce}")
-            visible_names = {}
-            for file_index, item in enumerate(files or []):
-                visible_names[item.name] = st.text_input(f"Nombre descriptivo · {item.name}", value=Path(item.name).stem,
-                                                         key=f"file_title_{row['id']}_{upload_nonce}_{file_index}")
-            if files and st.button("Subir archivos", key=f"upload_{row['id']}"):
-                records = []
-                for item in files:
-                    path = f"junta/{session['id']}/{row['id']}/{uuid.uuid4().hex}_{Path(item.name).name}"
-                    client.storage.from_("expedientes").upload(path, item.getvalue(), {"content-type": item.type or "application/octet-stream"})
-                    records.append({"acuerdo_id": row["id"], "nombre_visible": visible_names.get(item.name) or Path(item.name).stem,
-                                    "nombre_archivo": item.name, "ruta_storage": path, "mime_type": item.type,
-                                    "tamano_bytes": item.size, "subido_por": st.session_state.user["id"],
-                                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")})
-                client.table("archivos_acuerdo").insert(records).execute()
-                st.session_state[upload_nonce_key] = upload_nonce + 1
-                st.success("Archivos adjuntados."); st.rerun()
             stored_files = client.table("archivos_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
+            st.markdown(f"#### Expediente documental · {len(stored_files)} archivo(s)")
+            st.caption("Documentos, presentaciones y evidencias vinculadas específicamente con este acuerdo.")
+            with st.container(border=True):
+                st.markdown("##### Incorporar documentos")
+                files = st.file_uploader("Seleccionar archivos", accept_multiple_files=True, key=f"files_{row['id']}_{upload_nonce}")
+                visible_names = {}
+                for file_index, item in enumerate(files or []):
+                    visible_names[item.name] = st.text_input(f"Nombre descriptivo · {item.name}", value=Path(item.name).stem,
+                                                             key=f"file_title_{row['id']}_{upload_nonce}_{file_index}")
+                if files and st.button("Agregar al expediente", key=f"upload_{row['id']}", type="secondary"):
+                    records = []
+                    for item in files:
+                        path = f"junta/{session['id']}/{row['id']}/{uuid.uuid4().hex}_{Path(item.name).name}"
+                        client.storage.from_("expedientes").upload(path, item.getvalue(), {"content-type": item.type or "application/octet-stream"})
+                        records.append({"acuerdo_id": row["id"], "nombre_visible": visible_names.get(item.name) or Path(item.name).stem,
+                                        "nombre_archivo": item.name, "ruta_storage": path, "mime_type": item.type,
+                                        "tamano_bytes": item.size, "subido_por": st.session_state.user["id"],
+                                        "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")})
+                    client.table("archivos_acuerdo").insert(records).execute()
+                    st.session_state[upload_nonce_key] = upload_nonce + 1
+                    st.success("Archivos incorporados al expediente."); st.rerun()
             for stored in stored_files:
-                try:
-                    content = client.storage.from_("expedientes").download(stored["ruta_storage"])
-                    st.markdown(f"**{html.escape(stored.get('nombre_visible') or stored['nombre_archivo'])}**")
-                    st.caption(f"Subido por {stored.get('autor_nombre') or 'Usuario'} · {str(stored.get('created_at') or '')[:16]}")
-                    st.download_button(f"Descargar · {stored['nombre_archivo']}", content, file_name=stored["nombre_archivo"],
-                                       mime=stored.get("mime_type") or "application/octet-stream", key=f"download_board_{stored['id']}")
-                    with st.expander(f"Previsualizar · {stored['nombre_archivo']}"):
-                        if not _document_preview(content, stored["nombre_archivo"], 650):
-                            st.info("La vista previa no está disponible para este formato.")
-                except Exception:
-                    st.caption(f"Archivo: {stored['nombre_archivo']}")
+                agreement_document = {**stored, "tipo_documento": "Documento del acuerdo"}
+                _document_card(client, agreement_document, "agreement_doc", "archivos_acuerdo")
             if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
                 save_follow_up()
             st.markdown("#### Ficha del acuerdo")
