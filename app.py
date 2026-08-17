@@ -34,7 +34,7 @@ MODULE_PROJECTS = "Programas / Proyectos"
 MODULE_BOARD = "Junta de Gobierno"
 MODULE_COMMITTEES = "Comités"
 ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES]
-USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación"]
+USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
 
 
@@ -96,6 +96,8 @@ st.markdown("""
 .session-column { background:rgba(255,255,255,.72); border:1px solid #dfe7e9; border-radius:18px; padding:1rem 1rem .4rem; min-height:220px; }
 .session-card { background:#fff; border-left:7px solid var(--accent,var(--blue)); border-radius:13px; padding:1rem 1.1rem; margin:.7rem 0 .35rem; box-shadow:0 5px 16px rgba(53,67,75,.07); }
 .session-card h4 { margin:0 0 .25rem; font-size:1.08rem; }.session-card p { margin:0; color:#738087; font-size:.83rem; }
+[class*="st-key-session_open_"] div[data-testid="stButton"] button { background:#e7f4ec!important; border-color:#a8d3b7!important; color:#245c3b!important; font-weight:700; }
+[class*="st-key-session_open_"] div[data-testid="stButton"] button:hover { background:#d6ecdf!important; border-color:#79b78e!important; }
 @media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,1fr)}}
 div[data-testid="stForm"] { background:white; padding:1.55rem; border-radius:18px; border:1px solid #dfe7e9; box-shadow:0 8px 24px rgba(20,55,70,.045); }
 div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--orange); border-bottom:1px solid #e4ebed; padding:.15rem 0 .65rem .75rem; margin-top:1.2rem; }
@@ -870,7 +872,7 @@ def user_management():
 
 BOARD_YEARS = [2025, 2026, 2027, 2028, 2029, 2030]
 PRESET_BOARD_SESSIONS = ["Primera (1era)", "Segunda (2da)", "Tercera (3ra)"]
-BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Operaciones", "Dirección de Planeación"]
+BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 
 
 def board_year_label(year: int) -> str:
@@ -1034,6 +1036,7 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
+    st.caption("Versión Junta de Gobierno corregida · 17/08/2026")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     session_date = st.date_input("Fecha de la sesión", value=date.fromisoformat(session["fecha_sesion"][:10]) if session.get("fecha_sesion") else None,
@@ -1042,7 +1045,29 @@ def board_session_detail(session: dict):
         client.table("sesiones_junta").update({"fecha_sesion": session_date.isoformat() if session_date else None}).eq("id", session["id"]).execute()
         st.session_state.board_session["fecha_sesion"] = session_date.isoformat() if session_date else None
         st.success("Fecha de la sesión guardada.")
-    uploaded = st.file_uploader("Convocatoria u orden del día", type=["docx", "pptx", "pdf"], key=f"board_ingest_{session['id']}")
+    media1, media2, media3 = st.columns([1.15, 1.15, 1.4])
+    uploaded = media1.file_uploader("Convocatoria u orden del día", type=["docx", "pptx", "pdf"], key=f"board_ingest_{session['id']}")
+    signed_minutes = media2.file_uploader("Acta firmada", type=["pdf"], key=f"signed_minutes_{session['id']}")
+    video_url = media3.text_input("URL de la videograbación", value=session.get("videograbacion_url") or "",
+                                  placeholder="https://…", key=f"video_url_{session['id']}")
+    if media3.button("Guardar URL", key=f"save_video_{session['id']}", use_container_width=True):
+        client.table("sesiones_junta").update({"videograbacion_url": video_url.strip() or None}).eq("id", session["id"]).execute()
+        st.session_state.board_session["videograbacion_url"] = video_url.strip() or None
+        st.success("URL de la videograbación guardada.")
+    if signed_minutes and media2.button("Guardar acta firmada", key=f"save_minutes_{session['id']}", use_container_width=True):
+        path = f"junta/{session['id']}/acta_firmada/{uuid.uuid4().hex}_{Path(signed_minutes.name).name}"
+        client.storage.from_("expedientes").upload(path, signed_minutes.getvalue(), {"content-type": signed_minutes.type or "application/pdf"})
+        client.table("sesiones_junta").update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path}).eq("id", session["id"]).execute()
+        st.session_state.board_session.update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path})
+        st.success("Acta firmada guardada.")
+    if session.get("acta_firmada_ruta"):
+        try:
+            minutes_data = client.storage.from_("expedientes").download(session["acta_firmada_ruta"])
+            media2.download_button(f"Descargar · {session.get('acta_firmada_nombre') or 'Acta firmada'}", minutes_data,
+                                   file_name=session.get("acta_firmada_nombre") or "acta_firmada.pdf", mime="application/pdf",
+                                   key=f"download_minutes_{session['id']}", use_container_width=True)
+        except Exception:
+            media2.caption("El acta está registrada, pero no pudo descargarse.")
     if uploaded and (uploaded.type == "application/pdf" or uploaded.name.lower().endswith(".pdf")):
         with st.expander("Previsualizar convocatoria PDF"):
             _pdf_preview(uploaded.getvalue())
@@ -1080,14 +1105,16 @@ def board_session_detail(session: dict):
             if payload:
                 client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
     st.divider()
-    rows = client.table("acuerdos_junta").select("*").eq("sesion_id", session["id"]).order("created_at").execute().data or []
+    rows = client.table("acuerdos_junta").select("*").eq("sesion_id", session["id"]).order("numero").execute().data or []
+    rows = [row for row in rows if not re.search(r"clausura(?:\s+de)?\s+la\s+sesi[oó]n|asuntos\s+varios", row.get("titulo") or "", re.I)]
     st.markdown(f"### Acuerdos e informes ({len(rows)})")
     if not rows: st.info("Esta sesión todavía no tiene puntos registrados.")
     for row in rows:
         is_report = (row.get("tipo_registro") == "Informe")
         status = row.get("estatus") or "Por iniciar"; color = {"Por iniciar": "red", "En proceso": "yellow", "Terminada": "green"}.get(status, "gray")
         areas = ", ".join(row.get("areas") or []) or "Sin responsable"
-        with st.expander(f"{row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
+        status_dot = {"Por iniciar": "🔴", "En proceso": "🟡", "Terminada": "🟢"}.get(status, "⚪")
+        with st.expander(f"{status_dot} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
             summary_status = "En progreso" if status == "En proceso" else status
             summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
@@ -1100,7 +1127,7 @@ def board_session_detail(session: dict):
             new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
             new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
             if not is_report: c3.caption(_deadline_label(new_date.isoformat() if new_date else None, new_status))
-            if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
+            def save_follow_up():
                 close_date = row.get("fecha_cierre")
                 compliance = row.get("cumplimiento")
                 if new_status == "Terminada":
@@ -1130,6 +1157,8 @@ def board_session_detail(session: dict):
                     st.rerun()
                 except Exception as exc:
                     st.error(f"No fue posible publicar el comentario: {exc}")
+            if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
+                save_follow_up()
             files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}")
             if files and st.button("Subir archivos", key=f"upload_{row['id']}"):
                 records = []
@@ -1200,7 +1229,7 @@ def board_year_dashboard(year: int):
     sessions = {"Ordinaria": [], "Extraordinaria": []}
     if configured():
         try:
-            rows = client.table("sesiones_junta").select("id,anio,tipo,nombre,fecha_sesion").eq("anio", year).order("created_at").execute().data or []
+            rows = client.table("sesiones_junta").select("id,anio,tipo,nombre,fecha_sesion,videograbacion_url,acta_firmada_nombre,acta_firmada_ruta").eq("anio", year).order("created_at").execute().data or []
             for row in rows:
                 sessions.setdefault(row.get("tipo"), []).append(row)
         except Exception as exc:
@@ -1217,8 +1246,11 @@ def board_year_dashboard(year: int):
         with column:
             st.markdown(f'<div class="session-column"><h3>Sesiones {session_type.lower()}s</h3></div>', unsafe_allow_html=True)
             for index, session in enumerate(sessions.get(session_type, [])):
-                st.markdown(f'<div class="session-card" style="--accent:{accent}"><h4>{html.escape(session["nombre"])}</h4><p>Sesión {session_type.lower()}</p></div>', unsafe_allow_html=True)
-                if st.button(f'Abrir {session["nombre"]}', key=f'open_board_{session_type}_{session["id"]}', use_container_width=True):
+                session_date_label = session.get("fecha_sesion") or "Fecha pendiente"
+                st.markdown(f'<div class="session-card" style="--accent:{accent}"><h4>{html.escape(session["nombre"])}</h4><p>Sesión {session_type.lower()} · <b>{html.escape(session_date_label)}</b></p></div>', unsafe_allow_html=True)
+                with st.container(key=f'session_open_{session_type}_{session["id"]}'):
+                    open_session = st.button(f'Abrir {session["nombre"]}', key=f'open_board_{session_type}_{session["id"]}', use_container_width=True)
+                if open_session:
                     st.session_state.board_session = session
                     st.rerun()
             if year >= 2027:
