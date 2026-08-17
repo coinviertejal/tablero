@@ -10,6 +10,7 @@ import uuid
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from docx import Document
 from pptx import Presentation
 from pypdf import PdfReader
@@ -19,7 +20,7 @@ from PIL import Image
 
 from data import MUNICIPIOS_JALISCO
 from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
-from exports import build_docx, build_pdf
+from exports import build_agreement_docx, build_agreement_pdf, build_docx, build_pdf
 
 st.set_page_config(page_title="COINVIERTE | Gestión Institucional", page_icon="🏛️", layout="wide")
 
@@ -64,7 +65,7 @@ st.markdown("""
 .metric-box .metric-value { color:var(--ink); font-size:1.55rem; font-weight:800; margin-top:.25rem; }
 .metric-blue{--metric:var(--blue)} .metric-green{--metric:var(--green)} .metric-orange{--metric:var(--orange)} .metric-purple{--metric:var(--purple)}
 .goal-heading { padding:.75rem 1rem; border-radius:10px; margin:1rem 0 .8rem; font-weight:800; border-left:8px solid var(--status-color); background:color-mix(in srgb,var(--status-color) 10%,white); }
-.status-red{--status-color:#6750a4}.status-yellow{--status-color:#a990c7}.status-green{--status-color:#009b4c}.status-gray{--status-color:#858e93}
+.status-red{--status-color:#b85c62}.status-yellow{--status-color:#c5a44a}.status-green{--status-color:#65a37a}.status-gray{--status-color:#858e93}
 .year-card { background:#fff; border:1px solid #dfe7e9; border-top:6px solid var(--accent,var(--blue)); border-radius:18px; padding:1.25rem; text-align:center; box-shadow:0 8px 22px rgba(53,67,75,.07); margin-top:.5rem; }
 .year-card h2 { font-size:2rem; margin:.1rem 0; color:var(--accent,var(--blue)); }
 .session-column { background:rgba(255,255,255,.72); border:1px solid #dfe7e9; border-radius:18px; padding:1rem 1rem .4rem; min-height:220px; }
@@ -77,6 +78,9 @@ div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--or
 .stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] { background:linear-gradient(90deg,#173b63,#6750a4)!important; border:0!important; color:white!important; }
 .stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primary"]:hover { background:linear-gradient(90deg,#0798cf,#6750a4)!important; }
 [data-baseweb="tag"] { background-color:#6750a4!important; }
+[data-testid="stBaseButton-primary"], [data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#173b63,#6750a4)!important; border-color:#173b63!important; color:white!important; }
+.stTabs [data-baseweb="tab"][aria-selected="true"] { color:#173b63!important; }
+.stTabs [data-baseweb="tab-highlight"] { background-color:#6750a4!important; }
 .stFormSubmitButton button[kind="primary"] { background:linear-gradient(90deg,var(--green),var(--teal)); border:0; }
 .stFormSubmitButton button[kind="primary"]:hover { background:linear-gradient(90deg,var(--blue),var(--teal)); }
 div[data-baseweb="radio"] div[aria-checked="true"] { color:var(--orange); }
@@ -893,6 +897,11 @@ def _deadline_label(value, status: str) -> str:
     return "Terminada"
 
 
+def _pdf_preview(data: bytes, height: int = 650):
+    encoded = base64.b64encode(data).decode("ascii")
+    components.html(f'<embed src="data:application/pdf;base64,{encoded}" type="application/pdf" width="100%" height="{height}px" style="border:1px solid #dfe7e9;border-radius:10px">', height=height + 12)
+
+
 def board_session_detail(session: dict):
     year = st.session_state.board_year
     year_label = board_year_label(int(year))
@@ -902,7 +911,16 @@ def board_session_detail(session: dict):
     st.markdown(f"## {session.get('nombre')}")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+    session_date = st.date_input("Fecha de la sesión", value=date.fromisoformat(session["fecha_sesion"][:10]) if session.get("fecha_sesion") else None,
+                                 key=f"session_date_{session['id']}")
+    if st.button("Guardar fecha de la sesión", key=f"save_session_date_{session['id']}"):
+        client.table("sesiones_junta").update({"fecha_sesion": session_date.isoformat() if session_date else None}).eq("id", session["id"]).execute()
+        st.session_state.board_session["fecha_sesion"] = session_date.isoformat() if session_date else None
+        st.success("Fecha de la sesión guardada.")
     uploaded = st.file_uploader("Convocatoria u orden del día", type=["docx", "pptx", "pdf"], key=f"board_ingest_{session['id']}")
+    if uploaded and (uploaded.type == "application/pdf" or uploaded.name.lower().endswith(".pdf")):
+        with st.expander("Previsualizar convocatoria PDF"):
+            _pdf_preview(uploaded.getvalue())
     if uploaded and st.button("Analizar y separar puntos", type="primary", use_container_width=True):
         try:
             text = _extract_board_text(uploaded)
@@ -945,20 +963,37 @@ def board_session_detail(session: dict):
         status = row.get("estatus") or "Por iniciar"; color = {"Por iniciar": "red", "En proceso": "yellow", "Terminada": "green"}.get(status, "gray")
         areas = ", ".join(row.get("areas") or []) or "Sin responsable"
         with st.expander(f"{row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
-            summary = areas if is_report else f"{status} · {areas}"
+            summary_status = "En progreso" if status == "En proceso" else status
+            summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
             if not is_report: st.caption(f"_{_deadline_label(row.get('fecha_compromiso'), status)}_")
             if row.get("texto"): st.write(row["texto"])
             c1, c2, c3 = st.columns([2, 1, 1])
             new_areas = c1.multiselect("Áreas responsables", BOARD_AREAS, default=row.get("areas") or [], key=f"areas_{row['id']}")
             statuses = ["Por iniciar", "En proceso", "Terminada"]
-            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), key=f"status_{row['id']}")
+            display_statuses = {"Por iniciar": "Por iniciar", "En proceso": "En progreso", "Terminada": "Terminada"}
+            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
             new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
             if not is_report: c3.caption(_deadline_label(new_date.isoformat() if new_date else None, new_status))
-            if st.button("Guardar seguimiento", key=f"save_follow_{row['id']}"):
+            if st.button("Guardar cambios de seguimiento", key=f"save_follow_{row['id']}", type="primary", use_container_width=True):
+                close_date = row.get("fecha_cierre")
+                compliance = row.get("cumplimiento")
+                if new_status == "Terminada":
+                    close_date = close_date or date.today().isoformat()
+                    compliance = "En tiempo" if new_date and date.fromisoformat(str(close_date)[:10]) <= new_date else ("Extemporáneo" if new_date else "Sin fecha compromiso")
+                else:
+                    close_date, compliance = None, None
                 client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "fecha_compromiso": new_date.isoformat() if new_date else None,
-                    "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute(); st.rerun()
+                    "fecha_cierre": close_date, "cumplimiento": compliance, "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute()
+                description = f"Estatus: {display_statuses[new_status]}; responsables: {', '.join(new_areas) or 'sin responsable'}; fecha compromiso: {new_date.isoformat() if new_date else 'sin fecha'}"
+                if compliance: description += f"; cumplimiento: {compliance}"
+                client.table("historial_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
+                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"), "descripcion": description}).execute()
+                st.success("Seguimiento guardado."); st.rerun()
+            if row.get("cumplimiento"):
+                st.info(f"Resultado de cumplimiento: {row['cumplimiento']} · cierre {row.get('fecha_cierre')}")
             comments = client.table("comentarios_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
+            history = client.table("historial_acuerdo").select("*").eq("acuerdo_id", row["id"]).order("created_at").execute().data or []
             for comment in comments:
                 st.markdown(f"**{html.escape(comment.get('autor_nombre') or 'Usuario')}** · {str(comment.get('created_at') or '')[:16]}"); st.write(comment.get("comentario"))
             with st.form(f"comment_{row['id']}", clear_on_submit=True):
@@ -985,8 +1020,20 @@ def board_session_detail(session: dict):
                     content = client.storage.from_("expedientes").download(stored["ruta_storage"])
                     st.download_button(f"Descargar · {stored['nombre_archivo']}", content, file_name=stored["nombre_archivo"],
                                        mime=stored.get("mime_type") or "application/octet-stream", key=f"download_board_{stored['id']}")
+                    if (stored.get("mime_type") == "application/pdf" or stored.get("nombre_archivo", "").lower().endswith(".pdf")):
+                        with st.expander(f"Previsualizar PDF · {stored['nombre_archivo']}"):
+                            _pdf_preview(content)
                 except Exception:
                     st.caption(f"Archivo: {stored['nombre_archivo']}")
+            st.markdown("#### Ficha del acuerdo")
+            agreement_docx = build_agreement_docx(row, session, comments, history, stored_files, "assets/logo_coinvierte.jpeg")
+            agreement_pdf = build_agreement_pdf(row, session, comments, history, stored_files, "assets/logo_coinvierte.jpeg")
+            with st.expander("Previsualizar ficha del acuerdo"):
+                _pdf_preview(agreement_pdf)
+            d1, d2 = st.columns(2)
+            safe_code = row.get("numero") or "acuerdo"
+            d1.download_button("Descargar ficha en PDF", agreement_pdf, file_name=f"Ficha_{safe_code}.pdf", mime="application/pdf", use_container_width=True, key=f"agreement_pdf_{row['id']}")
+            d2.download_button("Descargar ficha en Word", agreement_docx, file_name=f"Ficha_{safe_code}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, key=f"agreement_docx_{row['id']}")
 
 
 def board_search(client, year: int, term: str):
@@ -1028,7 +1075,7 @@ def board_year_dashboard(year: int):
     sessions = {"Ordinaria": [], "Extraordinaria": []}
     if configured():
         try:
-            rows = client.table("sesiones_junta").select("id,anio,tipo,nombre").eq("anio", year).order("created_at").execute().data or []
+            rows = client.table("sesiones_junta").select("id,anio,tipo,nombre,fecha_sesion").eq("anio", year).order("created_at").execute().data or []
             for row in rows:
                 sessions.setdefault(row.get("tipo"), []).append(row)
         except Exception as exc:

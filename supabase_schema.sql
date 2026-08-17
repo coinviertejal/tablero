@@ -176,11 +176,13 @@ create table if not exists public.sesiones_junta (
   anio integer not null check (anio between 2025 and 2030),
   tipo text not null check (tipo in ('Ordinaria','Extraordinaria')),
   nombre text not null,
+  fecha_sesion date,
   creado_por uuid not null references auth.users(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (anio, tipo, nombre)
 );
+alter table public.sesiones_junta add column if not exists fecha_sesion date;
 
 -- Sólo ejercicios oficiales 2025-2030.
 delete from public.sesiones_junta where anio = 0;
@@ -198,6 +200,8 @@ create table if not exists public.acuerdos_junta (
   areas jsonb not null default '[]'::jsonb,
   estatus text not null default 'Por iniciar' check (estatus in ('Por iniciar','En proceso','Terminada')),
   fecha_compromiso date,
+  fecha_cierre date,
+  cumplimiento text check (cumplimiento in ('En tiempo','Extemporáneo','Sin fecha compromiso')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -206,6 +210,8 @@ alter table public.acuerdos_junta add column if not exists tipo_registro text no
 alter table public.acuerdos_junta add column if not exists areas jsonb not null default '[]'::jsonb;
 alter table public.acuerdos_junta add column if not exists estatus text not null default 'Por iniciar';
 alter table public.acuerdos_junta add column if not exists fecha_compromiso date;
+alter table public.acuerdos_junta add column if not exists fecha_cierre date;
+alter table public.acuerdos_junta add column if not exists cumplimiento text;
 
 create table if not exists public.comentarios_acuerdo (
   id uuid primary key default gen_random_uuid(), acuerdo_id uuid not null references public.acuerdos_junta(id) on delete cascade,
@@ -217,11 +223,17 @@ create table if not exists public.archivos_acuerdo (
   nombre_archivo text not null, ruta_storage text not null unique, mime_type text, tamano_bytes bigint not null,
   subido_por uuid not null references auth.users(id), created_at timestamptz not null default now()
 );
+create table if not exists public.historial_acuerdo (
+  id uuid primary key default gen_random_uuid(), acuerdo_id uuid not null references public.acuerdos_junta(id) on delete cascade,
+  autor_id uuid not null references auth.users(id), autor_nombre text not null, descripcion text not null,
+  created_at timestamptz not null default now()
+);
 
 alter table public.sesiones_junta enable row level security;
 alter table public.acuerdos_junta enable row level security;
 alter table public.comentarios_acuerdo enable row level security;
 alter table public.archivos_acuerdo enable row level security;
+alter table public.historial_acuerdo enable row level security;
 drop policy if exists "usuarios consultan sesiones junta" on public.sesiones_junta;
 drop policy if exists "usuarios crean sesiones junta" on public.sesiones_junta;
 drop policy if exists "usuarios actualizan sesiones junta" on public.sesiones_junta;
@@ -248,6 +260,10 @@ drop policy if exists "usuarios consultan archivos junta" on public.archivos_acu
 drop policy if exists "usuarios crean archivos junta" on public.archivos_acuerdo;
 create policy "usuarios consultan archivos junta" on public.archivos_acuerdo for select to authenticated using (public.esta_autorizado());
 create policy "usuarios crean archivos junta" on public.archivos_acuerdo for insert to authenticated with check (public.esta_autorizado() and subido_por=auth.uid());
+drop policy if exists "usuarios consultan historial junta" on public.historial_acuerdo;
+drop policy if exists "usuarios crean historial junta" on public.historial_acuerdo;
+create policy "usuarios consultan historial junta" on public.historial_acuerdo for select to authenticated using (public.esta_autorizado());
+create policy "usuarios crean historial junta" on public.historial_acuerdo for insert to authenticated with check (public.esta_autorizado() and autor_id=auth.uid());
 
 create index if not exists acuerdos_junta_busqueda_idx
 on public.acuerdos_junta using gin (to_tsvector('spanish', coalesce(numero,'') || ' ' || titulo || ' ' || texto));
