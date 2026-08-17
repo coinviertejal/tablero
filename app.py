@@ -64,7 +64,7 @@ st.markdown("""
 .metric-box .metric-value { color:var(--ink); font-size:1.55rem; font-weight:800; margin-top:.25rem; }
 .metric-blue{--metric:var(--blue)} .metric-green{--metric:var(--green)} .metric-orange{--metric:var(--orange)} .metric-purple{--metric:var(--purple)}
 .goal-heading { padding:.75rem 1rem; border-radius:10px; margin:1rem 0 .8rem; font-weight:800; border-left:8px solid var(--status-color); background:color-mix(in srgb,var(--status-color) 10%,white); }
-.status-red{--status-color:#d9534f}.status-yellow{--status-color:#f0ad00}.status-green{--status-color:#009b4c}.status-gray{--status-color:#858e93}
+.status-red{--status-color:#6750a4}.status-yellow{--status-color:#a990c7}.status-green{--status-color:#009b4c}.status-gray{--status-color:#858e93}
 .year-card { background:#fff; border:1px solid #dfe7e9; border-top:6px solid var(--accent,var(--blue)); border-radius:18px; padding:1.25rem; text-align:center; box-shadow:0 8px 22px rgba(53,67,75,.07); margin-top:.5rem; }
 .year-card h2 { font-size:2rem; margin:.1rem 0; color:var(--accent,var(--blue)); }
 .session-column { background:rgba(255,255,255,.72); border:1px solid #dfe7e9; border-radius:18px; padding:1rem 1rem .4rem; min-height:220px; }
@@ -74,6 +74,9 @@ st.markdown("""
 div[data-testid="stForm"] { background:white; padding:1.55rem; border-radius:18px; border:1px solid #dfe7e9; box-shadow:0 8px 24px rgba(20,55,70,.045); }
 div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--orange); border-bottom:1px solid #e4ebed; padding:.15rem 0 .65rem .75rem; margin-top:1.2rem; }
 .stButton button, .stFormSubmitButton button { border-radius:10px; }
+.stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] { background:linear-gradient(90deg,#173b63,#6750a4)!important; border:0!important; color:white!important; }
+.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primary"]:hover { background:linear-gradient(90deg,#0798cf,#6750a4)!important; }
+[data-baseweb="tag"] { background-color:#6750a4!important; }
 .stFormSubmitButton button[kind="primary"] { background:linear-gradient(90deg,var(--green),var(--teal)); border:0; }
 .stFormSubmitButton button[kind="primary"]:hover { background:linear-gradient(90deg,var(--blue),var(--teal)); }
 div[data-baseweb="radio"] div[aria-checked="true"] { color:var(--orange); }
@@ -861,10 +864,9 @@ def _board_items_from_text(text: str) -> list[dict]:
     if current: items.append(current.strip())
     results = []
     for item in items:
-        if re.search(r"(lista de asistencia|declaraci[oó]n de qu[oó]rum|lectura del acta)", item, re.I): continue
+        if re.search(r"(lista de asistencia|declaraci[oó]n de qu[oó]rum|lectura del acta|clausura(?:\s+de)?\s+la\s+sesi[oó]n|asuntos\s+varios)", item, re.I): continue
         is_report = bool(re.search(r"\binforme\b", item, re.I)) and not bool(re.search(r"aprobaci[oó]n", item, re.I))
-        results.append({"tipo_registro": "Informe" if is_report else "Acuerdo", "titulo": item, "texto": item,
-                        "areas": [], "estatus": "Por iniciar", "fecha_compromiso": None})
+        results.append({"tipo_registro": "Informe" if is_report else "Acuerdo", "titulo": item, "texto": item, "Eliminar": False})
     return results
 
 
@@ -910,21 +912,28 @@ def board_session_detail(session: dict):
     draft_key = f"board_draft_{session['id']}"
     if draft_key in st.session_state:
         st.markdown("#### Revisión antes de guardar")
+        add_col, help_col = st.columns([1, 4])
+        if add_col.button("＋ Agregar punto", use_container_width=True):
+            st.session_state[draft_key].append({"tipo_registro": "Acuerdo", "titulo": "", "texto": "", "Eliminar": False})
+            st.rerun()
+        help_col.caption("Marca “Eliminar” en los renglones que no deben guardarse. Puedes editar cualquier texto directamente en la tabla.")
         edited = st.data_editor(pd.DataFrame(st.session_state[draft_key]), use_container_width=True, hide_index=True, num_rows="dynamic",
             column_config={"tipo_registro": st.column_config.SelectboxColumn("Tipo", options=["Acuerdo", "Informe"], required=True),
                            "titulo": st.column_config.TextColumn("Punto del orden del día", width="large", required=True),
                            "texto": st.column_config.TextColumn("Texto / descripción", width="large"),
-                           "areas": st.column_config.MultiselectColumn("Áreas responsables", options=BOARD_AREAS),
-                           "estatus": st.column_config.SelectboxColumn("Estatus", options=["Por iniciar", "En proceso", "Terminada"]),
-                           "fecha_compromiso": st.column_config.DateColumn("Fecha compromiso")}, key=f"board_draft_editor_{session['id']}")
+                           "Eliminar": st.column_config.CheckboxColumn("Eliminar", default=False)}, key=f"board_draft_editor_{session['id']}")
+        delete_col, _ = st.columns([1, 4])
+        if delete_col.button("Borrar marcados", use_container_width=True):
+            st.session_state[draft_key] = [row for row in edited.to_dict("records") if not row.get("Eliminar")]
+            st.rerun()
         if st.button("Guardar filas en la sesión", type="primary", use_container_width=True):
             existing = client.table("acuerdos_junta").select("id").eq("sesion_id", session["id"]).execute().data or []
             payload = []
-            for offset, row in enumerate(edited.to_dict("records"), len(existing) + 1):
-                if not str(row.get("titulo") or "").strip(): continue
+            approved_rows = [row for row in edited.to_dict("records") if not row.get("Eliminar") and str(row.get("titulo") or "").strip()]
+            for offset, row in enumerate(approved_rows, len(existing) + 1):
                 payload.append({"sesion_id": session["id"], "numero": _agreement_code(session, offset), "tipo_registro": row.get("tipo_registro") or "Acuerdo",
-                    "titulo": str(row["titulo"]).strip(), "texto": str(row.get("texto") or "").strip(), "areas": row.get("areas") or [],
-                    "estatus": row.get("estatus") or "Por iniciar", "fecha_compromiso": str(row["fecha_compromiso"])[:10] if row.get("fecha_compromiso") else None})
+                    "titulo": str(row["titulo"]).strip(), "texto": str(row.get("texto") or "").strip(), "areas": [],
+                    "estatus": "Por iniciar", "fecha_compromiso": None})
             if payload:
                 client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
     st.divider()
@@ -945,6 +954,7 @@ def board_session_detail(session: dict):
             statuses = ["Por iniciar", "En proceso", "Terminada"]
             new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), key=f"status_{row['id']}")
             new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
+            if not is_report: c3.caption(_deadline_label(new_date.isoformat() if new_date else None, new_status))
             if st.button("Guardar seguimiento", key=f"save_follow_{row['id']}"):
                 client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "fecha_compromiso": new_date.isoformat() if new_date else None,
                     "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute(); st.rerun()
@@ -954,8 +964,12 @@ def board_session_detail(session: dict):
             with st.form(f"comment_{row['id']}", clear_on_submit=True):
                 comment_text = st.text_area("Agregar comentario"); add_comment = st.form_submit_button("Publicar comentario")
             if add_comment and comment_text.strip():
-                client.table("comentarios_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
-                    "autor_nombre": st.session_state.profile.get("nombre") or st.session_state.user.get("email"), "comentario": comment_text.strip()}).execute(); st.rerun()
+                try:
+                    client.table("comentarios_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
+                        "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"), "comentario": comment_text.strip()}).execute()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible publicar el comentario: {exc}")
             files = st.file_uploader("Adjuntar archivos", accept_multiple_files=True, key=f"files_{row['id']}")
             if files and st.button("Subir archivos", key=f"upload_{row['id']}"):
                 records = []
