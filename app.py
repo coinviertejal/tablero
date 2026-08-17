@@ -30,6 +30,23 @@ from data import MUNICIPIOS_JALISCO
 from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
 from exports import build_docx, build_pdf
 
+MODULE_PROJECTS = "Programas / Proyectos"
+MODULE_BOARD = "Junta de Gobierno"
+MODULE_COMMITTEES = "Comités"
+ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES]
+USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación"]
+PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
+
+
+def user_can(module: str) -> bool:
+    user = st.session_state.get("user", {})
+    return user.get("rol") == "administrador" or module in (user.get("modulos") or [])
+
+
+def user_can_project_direction(direction: str) -> bool:
+    user = st.session_state.get("user", {})
+    return user.get("rol") == "administrador" or direction in (user.get("direcciones_proyectos") or [])
+
 st.set_page_config(page_title="COINVIERTE | Gestión Institucional", page_icon="🏛️", layout="wide")
 
 st.markdown("""
@@ -200,7 +217,9 @@ def login():
                 return
             st.session_state.user = {"email": auth.user.email, "id": str(auth.user.id),
                                      "nombre": profile.get("nombre") or auth.user.email,
-                                     "rol": profile.get("rol", "usuario")}
+                                     "rol": profile.get("rol", "usuario"), "direccion": profile.get("direccion"),
+                                     "modulos": profile.get("modulos") or [],
+                                     "direcciones_proyectos": profile.get("direcciones_proyectos") or []}
             register_access(user_client)
             st.rerun()
 
@@ -208,12 +227,15 @@ def login():
 def landing():
     logo_header()
     st.markdown(f'<div class="welcome">Sesión institucional activa · <b>{st.session_state.user["email"]}</b></div>', unsafe_allow_html=True)
-    cols = st.columns(3)
-    sections = [
+    sections = [item for item in [
         ("01", "Programas / Proyectos", "Alta, consulta, edición y seguimiento de expedientes."),
         ("02", "Junta de Gobierno", "Actas, acuerdos y documentación de las sesiones."),
         ("03", "Comités", "Integración, sesiones, actas y dictaminación."),
-    ]
+    ] if user_can(item[1])]
+    if not sections:
+        st.info("Tu cuenta está activa, pero todavía no tiene módulos asignados. Solicita al administrador que configure tus permisos.")
+        return
+    cols = st.columns(len(sections))
     card_styles = ["card-blue", "card-green", "card-purple"]
     for col, (icon, title, text), card_style in zip(cols, sections, card_styles):
         with col:
@@ -753,16 +775,25 @@ def user_management():
         with st.form("create_access_code"):
             name = st.text_input("Nombre de la persona")
             email = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
+            direction = st.selectbox("Dirección de adscripción", USER_DIRECTIONS)
+            modules = st.multiselect("Módulos visibles en el inicio", ALL_MODULES, default=[])
+            project_directions = st.multiselect("Áreas visibles dentro de Proyectos", PROJECT_DIRECTIONS,
+                                                help="Sólo se aplican cuando se concede acceso a Programas / Proyectos.")
             hours = st.selectbox("Vigencia del código", [24, 48, 72, 168],
                                  format_func=lambda value: "7 días" if value == 168 else f"{value} horas")
             create_code = st.form_submit_button("Generar código de acceso", type="primary", use_container_width=True)
         if create_code:
             if not valid_official_email(email):
                 st.error("Sólo se pueden autorizar correos @jalisco.gob.mx.")
+            elif not modules:
+                st.error("Selecciona al menos un módulo visible.")
+            elif MODULE_PROJECTS in modules and not project_directions:
+                st.error("Selecciona Operaciones, Dirección de Proyectos o ambas.")
             else:
                 try:
                     result = client.rpc("crear_codigo_acceso", {"p_email": email.lower().strip(),
-                                                                 "p_nombre": name.strip(), "p_horas": hours}).execute().data
+                        "p_nombre": name.strip(), "p_horas": hours, "p_direccion": direction,
+                        "p_modulos": modules, "p_direcciones_proyectos": project_directions}).execute().data
                     record = result[0] if isinstance(result, list) else result
                     st.session_state.generated_code = record
                     st.session_state.generated_email = email.lower().strip()
@@ -775,11 +806,14 @@ def user_management():
             st.caption(f"Vence: {record.get('vence', '')}. Compártelo únicamente con la persona autorizada.")
 
     with users_tab:
-        rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo,ultimo_acceso,created_at").order("created_at", desc=True).execute().data
+        rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo,direccion,modulos,direcciones_proyectos,ultimo_acceso,created_at").order("created_at", desc=True).execute().data
         if not rows:
             st.info("Todavía no hay usuarios registrados.")
         else:
-            st.dataframe([{ "Nombre": row.get("nombre"), "Correo": row.get("email"), "Rol": row.get("rol"),
+            st.dataframe([{ "Nombre": row.get("nombre"), "Correo": row.get("email"), "Dirección": row.get("direccion") or "Sin asignar",
+                            "Módulos": ", ".join(row.get("modulos") or []) or "Ninguno",
+                            "Proyectos": ", ".join(row.get("direcciones_proyectos") or []) or "Sin acceso",
+                            "Rol": row.get("rol"),
                             "Estado": "Activo" if row.get("activo") else "Suspendido / pendiente",
                             "Último acceso": row.get("ultimo_acceso") or "Sin acceso"} for row in rows],
                          use_container_width=True, hide_index=True)
@@ -788,6 +822,23 @@ def user_management():
                 labels = {f"{row.get('nombre') or 'Sin nombre'} — {row['email']}": row for row in manageable}
                 selected_label = st.selectbox("Administrar usuario", list(labels.keys()))
                 selected = labels[selected_label]
+                with st.form(f"permissions_{selected['id']}"):
+                    edit_direction = st.selectbox("Dirección de adscripción", USER_DIRECTIONS,
+                        index=USER_DIRECTIONS.index(selected.get("direccion")) if selected.get("direccion") in USER_DIRECTIONS else 0)
+                    edit_modules = st.multiselect("Módulos visibles", ALL_MODULES, default=selected.get("modulos") or [])
+                    edit_project_directions = st.multiselect("Áreas visibles dentro de Proyectos", PROJECT_DIRECTIONS,
+                        default=selected.get("direcciones_proyectos") or [])
+                    save_permissions = st.form_submit_button("Guardar dirección y permisos", type="primary", use_container_width=True)
+                if save_permissions:
+                    if not edit_modules:
+                        st.error("Selecciona al menos un módulo.")
+                    elif MODULE_PROJECTS in edit_modules and not edit_project_directions:
+                        st.error("Selecciona al menos un área de Proyectos.")
+                    else:
+                        client.table("usuarios_autorizados").update({"direccion": edit_direction, "modulos": edit_modules,
+                            "direcciones_proyectos": edit_project_directions, "updated_at": datetime.now().isoformat()}).eq("id", selected["id"]).execute()
+                        st.success("Dirección y permisos actualizados.")
+                        st.rerun()
                 c1, c2 = st.columns(2)
                 if selected.get("activo"):
                     if c1.button("Suspender acceso", use_container_width=True):
@@ -801,10 +852,20 @@ def user_management():
                         st.rerun()
                 if c2.button("Generar nuevo código", use_container_width=True):
                     result = client.rpc("crear_codigo_acceso", {"p_email": selected["email"],
-                                                                 "p_nombre": selected.get("nombre") or "", "p_horas": 24}).execute().data
+                        "p_nombre": selected.get("nombre") or "", "p_horas": 24,
+                        "p_direccion": selected.get("direccion") or USER_DIRECTIONS[0],
+                        "p_modulos": selected.get("modulos") or [],
+                        "p_direcciones_proyectos": selected.get("direcciones_proyectos") or []}).execute().data
                     st.session_state.generated_code = result[0] if isinstance(result, list) else result
                     st.session_state.generated_email = selected["email"]
                     st.success("Nuevo código generado. Consúltalo en la primera pestaña.")
+                st.divider()
+                confirm_remove = st.checkbox(f"Confirmo que deseo remover el acceso de {selected.get('nombre') or selected['email']}",
+                                             key=f"confirm_remove_{selected['id']}")
+                if st.button("Remover usuario", disabled=not confirm_remove, key=f"remove_user_{selected['id']}"):
+                    client.rpc("remover_usuario_autorizado", {"p_usuario_id": selected["id"]}).execute()
+                    st.success("El acceso fue removido. Sus aportaciones y documentos históricos se conservaron.")
+                    st.rerun()
 
 
 BOARD_YEARS = [2025, 2026, 2027, 2028, 2029, 2030]
@@ -1181,6 +1242,9 @@ def board_year_dashboard(year: int):
 
 
 def board_government():
+    if not user_can(MODULE_BOARD):
+        st.error("No tienes permisos para acceder a Junta de Gobierno.")
+        return
     if st.session_state.get("board_session"):
         board_session_detail(st.session_state.board_session)
     elif "board_year" in st.session_state:
@@ -1190,27 +1254,35 @@ def board_government():
 
 
 def programs():
+    if not user_can(MODULE_PROJECTS):
+        st.error("No tienes permisos para acceder al módulo de Programas / Proyectos.")
+        return
     direction = st.session_state.get("program_direction")
     action = st.session_state.get("program_action")
+
+    if direction and not user_can_project_direction(direction):
+        st.session_state.pop("program_direction", None)
+        st.session_state.pop("program_action", None)
+        st.error("No tienes permisos para consultar esa dirección.")
+        return
 
     if not direction:
         st.markdown('<h1 class="choice-title">Programas / Proyectos</h1>', unsafe_allow_html=True)
         st.markdown('<p class="choice-subtitle">Selecciona la dirección responsable para continuar</p>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2, gap="large")
-        with c1:
-            st.markdown('''<div class="choice-card choice-operations"><div class="choice-icon">DO</div>
-                <h3>Dirección de Operaciones</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
-            if st.button("Ingresar a Operaciones", key="choose_operations", use_container_width=True, type="primary"):
-                st.session_state.program_direction = "Dirección de Operaciones"
-                st.session_state.pop("program_action", None)
-                st.rerun()
-        with c2:
-            st.markdown('''<div class="choice-card choice-projects"><div class="choice-icon">DP</div>
-                <h3>Dirección de Proyectos</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
-            if st.button("Ingresar a Proyectos", key="choose_projects", use_container_width=True, type="primary"):
-                st.session_state.program_direction = "Dirección de Proyectos"
-                st.session_state.pop("program_action", None)
-                st.rerun()
+        allowed = [item for item in PROJECT_DIRECTIONS if user_can_project_direction(item)]
+        if not allowed:
+            st.info("No tienes áreas de proyecto asignadas.")
+            return
+        columns = st.columns(len(allowed), gap="large")
+        for column, allowed_direction in zip(columns, allowed):
+            with column:
+                is_operations = allowed_direction == "Dirección de Operaciones"
+                st.markdown(f'''<div class="choice-card {'choice-operations' if is_operations else 'choice-projects'}"><div class="choice-icon">{'DO' if is_operations else 'DP'}</div>
+                    <h3>{allowed_direction}</h3><p>Gestión de los programas y proyectos correspondientes a esta dirección.</p></div>''', unsafe_allow_html=True)
+                if st.button(f"Ingresar a {'Operaciones' if is_operations else 'Proyectos'}", key=f"choose_{allowed_direction}", use_container_width=True, type="primary"):
+                    st.session_state.program_direction = allowed_direction
+                    st.session_state.pop("program_action", None)
+                    st.rerun()
         return
 
     if not action:
@@ -1289,19 +1361,22 @@ else:
         if st.button("Inicio", use_container_width=True):
             st.session_state.page = "Inicio"
             st.rerun()
-        if st.button("Programas / Proyectos", use_container_width=True):
-            st.session_state.page = "Programas / Proyectos"
-            st.session_state.pop("program_direction", None)
-            st.session_state.pop("program_action", None)
-            st.rerun()
-        if st.button("Junta de Gobierno", use_container_width=True):
-            st.session_state.page = "Junta de Gobierno"
-            st.session_state.pop("board_year", None)
-            st.session_state.pop("board_session", None)
-            st.rerun()
-        if st.button("Comités", use_container_width=True):
-            st.session_state.page = "Comités"
-            st.rerun()
+        if user_can(MODULE_PROJECTS):
+            if st.button("Programas / Proyectos", use_container_width=True):
+                st.session_state.page = "Programas / Proyectos"
+                st.session_state.pop("program_direction", None)
+                st.session_state.pop("program_action", None)
+                st.rerun()
+        if user_can(MODULE_BOARD):
+            if st.button("Junta de Gobierno", use_container_width=True):
+                st.session_state.page = "Junta de Gobierno"
+                st.session_state.pop("board_year", None)
+                st.session_state.pop("board_session", None)
+                st.rerun()
+        if user_can(MODULE_COMMITTEES):
+            if st.button("Comités", use_container_width=True):
+                st.session_state.page = "Comités"
+                st.rerun()
         if st.session_state.user.get("rol") == "administrador":
             if st.button("Gestión de usuarios", use_container_width=True):
                 st.session_state.page = "Gestión de usuarios"
@@ -1315,4 +1390,6 @@ else:
     elif page == "Programas / Proyectos": programs()
     elif page == "Junta de Gobierno": board_government()
     elif page == "Gestión de usuarios": user_management()
-    else: placeholder(page)
+    elif page == "Comités" and user_can(MODULE_COMMITTEES): placeholder(page)
+    elif page == "Comités": st.error("No tienes permisos para acceder a Comités.")
+    else: landing()

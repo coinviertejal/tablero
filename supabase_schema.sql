@@ -7,11 +7,17 @@ create table if not exists public.usuarios_autorizados (
   email text not null unique check (lower(email) like '%@jalisco.gob.mx'),
   nombre text,
   rol text not null default 'usuario' check (rol in ('administrador','usuario')),
+  direccion text check (direccion in ('Dirección General','Dirección Jurídica','Dirección de Operaciones','Dirección de Planeación')),
+  modulos jsonb not null default '["Programas / Proyectos","Junta de Gobierno","Comités"]'::jsonb,
+  direcciones_proyectos jsonb not null default '["Dirección de Operaciones","Dirección de Proyectos"]'::jsonb,
   activo boolean not null default false,
   ultimo_acceso timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+alter table public.usuarios_autorizados add column if not exists direccion text;
+alter table public.usuarios_autorizados add column if not exists modulos jsonb not null default '["Programas / Proyectos","Junta de Gobierno","Comités"]'::jsonb;
+alter table public.usuarios_autorizados add column if not exists direcciones_proyectos jsonb not null default '["Dirección de Operaciones","Dirección de Proyectos"]'::jsonb;
 
 create table if not exists public.codigos_acceso (
   id uuid primary key default gen_random_uuid(),
@@ -34,6 +40,18 @@ returns boolean language sql stable security definer set search_path=public as $
   select exists(select 1 from public.usuarios_autorizados where user_id=auth.uid() and activo=true);
 $$;
 
+create or replace function public.tiene_modulo(p_modulo text)
+returns boolean language sql stable security definer set search_path=public as $$
+  select exists(select 1 from public.usuarios_autorizados
+    where user_id=auth.uid() and activo=true and (rol='administrador' or modulos ? p_modulo));
+$$;
+
+create or replace function public.tiene_direccion_proyecto(p_direccion text)
+returns boolean language sql stable security definer set search_path=public as $$
+  select exists(select 1 from public.usuarios_autorizados
+    where user_id=auth.uid() and activo=true and (rol='administrador' or direcciones_proyectos ? p_direccion));
+$$;
+
 create or replace function public.vincular_usuario_autorizado()
 returns trigger language plpgsql security definer set search_path=public as $$
 begin
@@ -46,7 +64,11 @@ drop trigger if exists vincular_usuario_autorizado_trigger on auth.users;
 create trigger vincular_usuario_autorizado_trigger after insert or update of email on auth.users
 for each row execute function public.vincular_usuario_autorizado();
 
-create or replace function public.crear_codigo_acceso(p_email text, p_nombre text default null, p_horas integer default 24)
+drop function if exists public.crear_codigo_acceso(text,text,integer);
+create or replace function public.crear_codigo_acceso(
+  p_email text, p_nombre text default null, p_horas integer default 24,
+  p_direccion text default null, p_modulos jsonb default '[]'::jsonb,
+  p_direcciones_proyectos jsonb default '[]'::jsonb)
 returns table(codigo text, vence timestamptz) language plpgsql security definer set search_path=public as $$
 declare v_codigo text; v_vence timestamptz;
 begin
@@ -55,13 +77,27 @@ begin
   if p_email not like '%@jalisco.gob.mx' then raise exception 'Correo institucional no válido'; end if;
   v_codigo := upper(substr(encode(gen_random_bytes(6),'hex'),1,8));
   v_vence := now() + make_interval(hours => greatest(1,least(p_horas,168)));
-  insert into public.usuarios_autorizados(email,nombre,rol,activo)
-  values(p_email,nullif(trim(p_nombre),''),'usuario',false)
-  on conflict(email) do update set nombre=coalesce(excluded.nombre,usuarios_autorizados.nombre),updated_at=now();
+  insert into public.usuarios_autorizados(email,nombre,rol,direccion,modulos,direcciones_proyectos,activo)
+  values(p_email,nullif(trim(p_nombre),''),'usuario',p_direccion,coalesce(p_modulos,'[]'::jsonb),coalesce(p_direcciones_proyectos,'[]'::jsonb),false)
+  on conflict(email) do update set nombre=coalesce(excluded.nombre,usuarios_autorizados.nombre),
+    direccion=excluded.direccion,modulos=excluded.modulos,direcciones_proyectos=excluded.direcciones_proyectos,updated_at=now();
   update public.codigos_acceso set usado_at=now() where lower(email)=p_email and usado_at is null;
   insert into public.codigos_acceso(email,codigo_hash,expires_at,creado_por)
   values(p_email,encode(digest(v_codigo,'sha256'),'hex'),v_vence,auth.uid());
   return query select v_codigo,v_vence;
+end; $$;
+
+create or replace function public.remover_usuario_autorizado(p_usuario_id uuid)
+returns boolean language plpgsql security definer set search_path=public as $$
+declare v_email text; v_rol text;
+begin
+  if not public.es_administrador() then raise exception 'Acceso no autorizado'; end if;
+  select email,rol into v_email,v_rol from public.usuarios_autorizados where id=p_usuario_id;
+  if v_email is null then return false; end if;
+  if v_rol='administrador' then raise exception 'No se puede remover al administrador'; end if;
+  update public.codigos_acceso set usado_at=coalesce(usado_at,now()) where lower(email)=lower(v_email);
+  delete from public.usuarios_autorizados where id=p_usuario_id;
+  return true;
 end; $$;
 
 create or replace function public.canjear_codigo_acceso(p_email text, p_codigo text)
@@ -83,7 +119,8 @@ returns void language sql security definer set search_path=public as $$
 $$;
 
 grant execute on function public.canjear_codigo_acceso(text,text) to anon, authenticated;
-grant execute on function public.crear_codigo_acceso(text,text,integer) to authenticated;
+grant execute on function public.crear_codigo_acceso(text,text,integer,text,jsonb,jsonb) to authenticated;
+grant execute on function public.remover_usuario_autorizado(uuid) to authenticated;
 grant execute on function public.registrar_acceso() to authenticated;
 
 alter table public.usuarios_autorizados enable row level security;
@@ -148,16 +185,17 @@ drop policy if exists "usuarios oficiales actualizan proyectos" on public.proyec
 drop policy if exists "usuarios oficiales consultan documentos" on public.documentos;
 drop policy if exists "usuarios oficiales registran documentos" on public.documentos;
 create policy "usuarios oficiales consultan proyectos" on public.proyectos for select to authenticated
-using (public.esta_autorizado());
+using (public.tiene_modulo('Programas / Proyectos') and public.tiene_direccion_proyecto(direccion));
 create policy "usuarios oficiales crean proyectos" on public.proyectos for insert to authenticated
-with check (public.esta_autorizado() and creado_por = auth.uid());
+with check (public.tiene_modulo('Programas / Proyectos') and public.tiene_direccion_proyecto(direccion) and creado_por = auth.uid());
 create policy "usuarios oficiales actualizan proyectos" on public.proyectos for update to authenticated
-using (public.esta_autorizado()) with check (public.esta_autorizado());
+using (public.tiene_modulo('Programas / Proyectos') and public.tiene_direccion_proyecto(direccion))
+with check (public.tiene_modulo('Programas / Proyectos') and public.tiene_direccion_proyecto(direccion));
 
 create policy "usuarios oficiales consultan documentos" on public.documentos for select to authenticated
-using (public.esta_autorizado());
+using (exists(select 1 from public.proyectos p where p.id=proyecto_id));
 create policy "usuarios oficiales registran documentos" on public.documentos for insert to authenticated
-with check (public.esta_autorizado());
+with check (exists(select 1 from public.proyectos p where p.id=proyecto_id));
 
 insert into storage.buckets (id, name, public, file_size_limit)
 values ('expedientes', 'expedientes', false, 52428800)
@@ -241,29 +279,29 @@ drop policy if exists "usuarios consultan acuerdos junta" on public.acuerdos_jun
 drop policy if exists "usuarios crean acuerdos junta" on public.acuerdos_junta;
 drop policy if exists "usuarios actualizan acuerdos junta" on public.acuerdos_junta;
 create policy "usuarios consultan sesiones junta" on public.sesiones_junta for select to authenticated
-using (public.esta_autorizado());
+using (public.tiene_modulo('Junta de Gobierno'));
 create policy "usuarios crean sesiones junta" on public.sesiones_junta for insert to authenticated
-with check (public.esta_autorizado() and creado_por=auth.uid());
+with check (public.tiene_modulo('Junta de Gobierno') and creado_por=auth.uid());
 create policy "usuarios actualizan sesiones junta" on public.sesiones_junta for update to authenticated
-using (public.esta_autorizado()) with check (public.esta_autorizado());
+using (public.tiene_modulo('Junta de Gobierno')) with check (public.tiene_modulo('Junta de Gobierno'));
 create policy "usuarios consultan acuerdos junta" on public.acuerdos_junta for select to authenticated
-using (public.esta_autorizado());
+using (public.tiene_modulo('Junta de Gobierno'));
 create policy "usuarios crean acuerdos junta" on public.acuerdos_junta for insert to authenticated
-with check (public.esta_autorizado());
+with check (public.tiene_modulo('Junta de Gobierno'));
 create policy "usuarios actualizan acuerdos junta" on public.acuerdos_junta for update to authenticated
-using (public.esta_autorizado()) with check (public.esta_autorizado());
+using (public.tiene_modulo('Junta de Gobierno')) with check (public.tiene_modulo('Junta de Gobierno'));
 drop policy if exists "usuarios consultan comentarios junta" on public.comentarios_acuerdo;
 drop policy if exists "usuarios crean comentarios junta" on public.comentarios_acuerdo;
-create policy "usuarios consultan comentarios junta" on public.comentarios_acuerdo for select to authenticated using (public.esta_autorizado());
-create policy "usuarios crean comentarios junta" on public.comentarios_acuerdo for insert to authenticated with check (public.esta_autorizado() and autor_id=auth.uid());
+create policy "usuarios consultan comentarios junta" on public.comentarios_acuerdo for select to authenticated using (public.tiene_modulo('Junta de Gobierno'));
+create policy "usuarios crean comentarios junta" on public.comentarios_acuerdo for insert to authenticated with check (public.tiene_modulo('Junta de Gobierno') and autor_id=auth.uid());
 drop policy if exists "usuarios consultan archivos junta" on public.archivos_acuerdo;
 drop policy if exists "usuarios crean archivos junta" on public.archivos_acuerdo;
-create policy "usuarios consultan archivos junta" on public.archivos_acuerdo for select to authenticated using (public.esta_autorizado());
-create policy "usuarios crean archivos junta" on public.archivos_acuerdo for insert to authenticated with check (public.esta_autorizado() and subido_por=auth.uid());
+create policy "usuarios consultan archivos junta" on public.archivos_acuerdo for select to authenticated using (public.tiene_modulo('Junta de Gobierno'));
+create policy "usuarios crean archivos junta" on public.archivos_acuerdo for insert to authenticated with check (public.tiene_modulo('Junta de Gobierno') and subido_por=auth.uid());
 drop policy if exists "usuarios consultan historial junta" on public.historial_acuerdo;
 drop policy if exists "usuarios crean historial junta" on public.historial_acuerdo;
-create policy "usuarios consultan historial junta" on public.historial_acuerdo for select to authenticated using (public.esta_autorizado());
-create policy "usuarios crean historial junta" on public.historial_acuerdo for insert to authenticated with check (public.esta_autorizado() and autor_id=auth.uid());
+create policy "usuarios consultan historial junta" on public.historial_acuerdo for select to authenticated using (public.tiene_modulo('Junta de Gobierno'));
+create policy "usuarios crean historial junta" on public.historial_acuerdo for insert to authenticated with check (public.tiene_modulo('Junta de Gobierno') and autor_id=auth.uid());
 
 create index if not exists acuerdos_junta_busqueda_idx
 on public.acuerdos_junta using gin (to_tsvector('spanish', coalesce(numero,'') || ' ' || titulo || ' ' || texto));

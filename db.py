@@ -32,7 +32,7 @@ def client_with_token(access_token: str, refresh_token: str) -> Client:
 
 
 def access_profile(client: Client, email: str) -> dict | None:
-    rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo").eq("email", email.lower()).execute().data
+    rows = client.table("usuarios_autorizados").select("id,email,nombre,rol,activo,direccion,modulos,direcciones_proyectos").eq("email", email.lower()).execute().data
     return rows[0] if rows else None
 
 
