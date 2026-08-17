@@ -874,6 +874,12 @@ def user_management():
 
 BOARD_YEARS = [2025, 2026, 2027, 2028, 2029, 2030]
 PRESET_BOARD_SESSIONS = ["Primera (1era)", "Segunda (2da)", "Tercera (3ra)"]
+COMMITTEE_CATALOG = [
+    ("Comité de Ética", "Principios, integridad y conducta institucional.", "var(--blue)"),
+    ("Comité de Igualdad de Género", "Igualdad sustantiva y transversalización institucional.", "var(--purple)"),
+    ("Comité de Archivo", "Gestión documental, conservación y cumplimiento archivístico.", "var(--orange)"),
+    ("Comité de Control Interno", "Control institucional, riesgos y mejora continua.", "var(--green)"),
+]
 BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 
 
@@ -1414,8 +1420,7 @@ def board_year_dashboard(year: int):
                 if open_session:
                     st.session_state.board_session = session
                     st.rerun()
-            if year >= 2027:
-                with st.expander(f"＋ Agregar sesión {session_type.lower()}"):
+            with st.expander(f"＋ Agregar sesión {session_type.lower()}"):
                     with st.form(f"new_board_{year}_{session_type}"):
                         session_name = st.text_input("Nombre de la sesión", placeholder="Ej. Primera sesión ordinaria")
                         add_session = st.form_submit_button("Agregar sesión", type="primary", use_container_width=True)
@@ -1432,6 +1437,87 @@ def board_year_dashboard(year: int):
                                 st.rerun()
                             except Exception as exc:
                                 st.error(f"No fue posible agregar la sesión: {exc}")
+
+
+def committees():
+    if not user_can(MODULE_COMMITTEES):
+        st.error("No tienes permisos para acceder a Comités.")
+        return
+    selected_committee = st.session_state.get("committee_name")
+    selected_year = st.session_state.get("committee_year")
+    if not selected_committee:
+        st.markdown('<h1 class="choice-title">Comités</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="choice-subtitle">Selecciona el comité que deseas consultar</p>', unsafe_allow_html=True)
+        for start in range(0, len(COMMITTEE_CATALOG), 2):
+            columns = st.columns(2, gap="large")
+            for column, (name, description, accent) in zip(columns, COMMITTEE_CATALOG[start:start + 2]):
+                with column:
+                    st.markdown(f'''<div class="card" style="--accent:{accent};min-height:185px"><div class="card-icon">C</div>
+                        <h3>{html.escape(name)}</h3><p class="muted">{html.escape(description)}</p></div>''', unsafe_allow_html=True)
+                    if st.button(f"Abrir {name}", key=f"open_committee_{name}", use_container_width=True, type="primary"):
+                        st.session_state.committee_name = name
+                        st.session_state.pop("committee_year", None)
+                        st.rerun()
+        return
+    if selected_year is None:
+        top1, top2 = st.columns([1, 5])
+        if top1.button("← Comités", use_container_width=True):
+            st.session_state.pop("committee_name", None)
+            st.rerun()
+        top2.markdown(f"## {selected_committee}")
+        st.markdown('<p class="choice-subtitle">Selecciona el año de trabajo</p>', unsafe_allow_html=True)
+        year_columns = st.columns(3, gap="large")
+        for index, year in enumerate(range(2025, 2031)):
+            with year_columns[index % 3]:
+                st.markdown(f'''<div class="year-card"><div class="year-number">{year}</div>
+                    <div class="year-label">Sesiones y documentación</div></div>''', unsafe_allow_html=True)
+                if st.button(f"Abrir {year}", key=f"committee_year_{selected_committee}_{year}", use_container_width=True):
+                    st.session_state.committee_year = year
+                    st.rerun()
+        return
+    top1, top2 = st.columns([1, 5])
+    if top1.button("← Años", use_container_width=True):
+        st.session_state.pop("committee_year", None)
+        st.rerun()
+    top2.markdown(f"## {selected_committee} · {selected_year}")
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
+    sessions = []
+    if configured():
+        try:
+            sessions = (client.table("sesiones_comite").select("*").eq("comite", selected_committee)
+                        .eq("anio", selected_year).order("fecha_sesion").order("created_at").execute().data or [])
+        except Exception as exc:
+            st.warning(f"Ejecuta la migración de Comités para guardar sesiones: {exc}")
+    st.markdown("### Sesiones")
+    if not sessions:
+        st.info("Todavía no hay sesiones registradas para este comité y año.")
+    for session in sessions:
+        date_label = session.get("fecha_sesion") or "Fecha pendiente"
+        st.markdown(f'''<div class="session-card" style="--accent:var(--teal)"><h4>{html.escape(session.get("nombre") or "Sesión")}</h4>
+            <p>{html.escape(session.get("tipo") or "Sesión")} · <b>{html.escape(date_label)}</b></p></div>''', unsafe_allow_html=True)
+    st.markdown("---")
+    with st.expander("＋ Crear nueva sesión", expanded=not sessions):
+        with st.form(f"new_committee_session_{selected_committee}_{selected_year}", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            session_name = c1.text_input("Nombre de la sesión", placeholder="Ej. Primera sesión ordinaria")
+            session_type = c2.selectbox("Tipo de sesión", ["Ordinaria", "Extraordinaria"])
+            session_date = st.date_input("Fecha de la sesión", value=None)
+            add_session = st.form_submit_button("Crear sesión", type="primary", use_container_width=True)
+        if add_session:
+            if not session_name.strip():
+                st.error("Escribe el nombre de la sesión.")
+            elif not configured():
+                st.error("Primero debes conectar Supabase.")
+            else:
+                try:
+                    client.table("sesiones_comite").insert({"comite": selected_committee, "anio": selected_year,
+                        "tipo": session_type, "nombre": session_name.strip(),
+                        "fecha_sesion": session_date.isoformat() if session_date else None,
+                        "creado_por": st.session_state.user["id"]}).execute()
+                    st.success("Sesión creada correctamente.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible crear la sesión: {exc}")
 
 
 def board_government():
@@ -1583,6 +1669,6 @@ else:
     elif page == "Programas / Proyectos": programs()
     elif page == "Junta de Gobierno": board_government()
     elif page == "Gestión de usuarios": user_management()
-    elif page == "Comités" and user_can(MODULE_COMMITTEES): placeholder(page)
+    elif page == "Comités" and user_can(MODULE_COMMITTEES): committees()
     elif page == "Comités": st.error("No tienes permisos para acceder a Comités.")
     else: landing()
