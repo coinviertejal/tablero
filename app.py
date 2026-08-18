@@ -41,11 +41,68 @@ MODULE_COMMITTEES = "Comités"
 ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES]
 USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
+MASTER_ADMIN_EMAIL = "yani.limberopulos@jalisco.gob.mx"
 
 
 def user_can(module: str) -> bool:
     user = st.session_state.get("user", {})
     return user.get("rol") == "administrador" or module in (user.get("modulos") or [])
+
+
+def is_master_admin() -> bool:
+    """La autoridad destructiva se limita a una identidad explícita."""
+    return str(st.session_state.get("user", {}).get("email") or "").strip().lower() == MASTER_ADMIN_EMAIL
+
+
+def _remove_storage_paths(client, paths: list[str]) -> None:
+    clean = list(dict.fromkeys(str(path) for path in paths if path))
+    for start in range(0, len(clean), 100):
+        client.storage.from_("expedientes").remove(clean[start:start + 100])
+
+
+def delete_project_master(client, project_id: str) -> None:
+    documents = client.table("documentos").select("ruta_storage").eq("proyecto_id", project_id).execute().data or []
+    _remove_storage_paths(client, [row.get("ruta_storage") for row in documents])
+    client.table("proyectos").delete().eq("id", project_id).execute()
+
+
+def delete_board_session_master(client, session_id: str) -> None:
+    documents = client.table("documentos_sesion_junta").select("ruta_storage").eq("sesion_id", session_id).execute().data or []
+    agreements = client.table("acuerdos_junta").select("id").eq("sesion_id", session_id).execute().data or []
+    agreement_ids = [row["id"] for row in agreements]
+    agreement_files = []
+    if agreement_ids:
+        agreement_files = client.table("archivos_acuerdo").select("ruta_storage").in_("acuerdo_id", agreement_ids).execute().data or []
+    _remove_storage_paths(client, [row.get("ruta_storage") for row in documents + agreement_files])
+    client.table("sesiones_junta").delete().eq("id", session_id).execute()
+
+
+def delete_committee_session_master(client, session_id: str) -> None:
+    documents = client.table("documentos_sesion_comite").select("ruta_storage").eq("sesion_id", session_id).execute().data or []
+    _remove_storage_paths(client, [row.get("ruta_storage") for row in documents])
+    client.table("sesiones_comite").delete().eq("id", session_id).execute()
+
+
+def master_delete_control(label: str, object_id: str, key: str, delete_action) -> None:
+    """Control destructivo con confirmación escrita, visible sólo al administrador maestro."""
+    if not is_master_admin():
+        return
+    with st.expander(f"Administración maestra · Eliminar {label}"):
+        st.warning("Esta acción es definitiva y eliminará también acuerdos, seguimiento y documentos relacionados.")
+        confirmation = st.text_input(
+            "Para confirmar, escribe ELIMINAR", key=f"master_delete_text_{key}",
+            placeholder="ELIMINAR",
+        )
+        if st.button(
+            f"Eliminar definitivamente {label}", key=f"master_delete_button_{key}",
+            type="primary", use_container_width=True, disabled=confirmation.strip() != "ELIMINAR",
+        ):
+            try:
+                delete_action()
+                st.success(f"{label.capitalize()} eliminado definitivamente.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No fue posible eliminar {label}: {exc}")
 
 
 def user_can_project_direction(direction: str) -> bool:
@@ -759,6 +816,12 @@ def view_active_projects(direction: str):
             st.rerun()
         if "view_project_photos" not in st.session_state:
             st.session_state.view_project_photos = download_project_images(client, str(project["id"]))
+        master_delete_control(
+            "proyecto", str(project["id"]), f"view_project_{project['id']}",
+            lambda: (delete_project_master(client, str(project["id"])),
+                     st.session_state.pop("view_project_id", None),
+                     st.session_state.pop("view_project_photos", None)),
+        )
         render_readonly_project(project, st.session_state.view_project_photos)
         return
 
@@ -1210,7 +1273,9 @@ def _document_card(client, document: dict, key_prefix: str, table_name: str):
         )
         try:
             data = client.storage.from_("expedientes").download(document["ruta_storage"])
-            view_col, download_col, delete_col = actions.columns(3)
+            action_columns = actions.columns(3 if is_master_admin() else 2)
+            view_col, download_col = action_columns[0], action_columns[1]
+            delete_col = action_columns[2] if is_master_admin() else None
             show_preview = view_col.toggle("Ver", key=f"{key_prefix}_view_{document['id']}")
             download_col.download_button(
                 "Descargar", data, file_name=filename,
@@ -1218,10 +1283,10 @@ def _document_card(client, document: dict, key_prefix: str, table_name: str):
                 key=f"{key_prefix}_download_{document['id']}", use_container_width=True,
             )
             pending_key = f"{key_prefix}_pending_delete_{document['id']}"
-            if delete_col.button("Eliminar", key=f"{key_prefix}_delete_{document['id']}", use_container_width=True):
+            if delete_col and delete_col.button("Eliminar", key=f"{key_prefix}_delete_{document['id']}", use_container_width=True):
                 st.session_state[pending_key] = True
                 st.rerun()
-            if st.session_state.get(pending_key):
+            if is_master_admin() and st.session_state.get(pending_key):
                 st.warning(f"¿Eliminar definitivamente “{document.get('nombre_visible') or filename}” del expediente?")
                 confirm_col, cancel_col, _ = st.columns([1, 1, 4])
                 if confirm_col.button("Sí, eliminar", key=f"{key_prefix}_confirm_{document['id']}", type="primary"):
@@ -1311,6 +1376,12 @@ def board_session_detail(session: dict):
     st.caption("Versión Junta Visor PPT V12 · láminas con diseño completo")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+    if not str(session.get("id", "")).startswith("preset-"):
+        master_delete_control(
+            "sesión de Junta de Gobierno", str(session["id"]), f"board_detail_{session['id']}",
+            lambda: (delete_board_session_master(client, str(session["id"])),
+                     st.session_state.pop("board_session", None)),
+        )
     session_documents = (client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"])
                          .order("created_at").execute().data or [])
     latest_document = {}
@@ -1602,6 +1673,12 @@ def board_year_dashboard(year: int):
                 if open_session:
                     st.session_state.board_session = session
                     st.rerun()
+                if not str(session.get("id", "")).startswith("preset-"):
+                    master_delete_control(
+                        "sesión de Junta de Gobierno", str(session["id"]),
+                        f"board_card_{session_type}_{session['id']}",
+                        lambda session_id=str(session["id"]): delete_board_session_master(client, session_id),
+                    )
             with st.expander(f"＋ Agregar sesión {session_type.lower()}"):
                     with st.form(f"new_board_{year}_{session_type}"):
                         session_name = st.text_input("Nombre de la sesión", placeholder="Ej. Primera sesión ordinaria")
@@ -1650,6 +1727,11 @@ def committee_session_detail(session: dict, client):
     st.markdown(f"## {session.get('nombre') or 'Sesión'}")
     st.caption(f"{session.get('comite')} · {session.get('tipo')} · {session.get('fecha_sesion') or 'Fecha pendiente'}")
     st.caption("Versión Comités V13 · expediente, acuerdos y seguimiento")
+    master_delete_control(
+        "sesión de Comité", str(session["id"]), f"committee_detail_{session['id']}",
+        lambda: (delete_committee_session_master(client, str(session["id"])),
+                 st.session_state.pop("committee_session", None)),
+    )
 
     try:
         documents = (client.table("documentos_sesion_comite").select("*").eq("sesion_id", session["id"])
@@ -1874,6 +1956,10 @@ def committees():
                              type="primary", use_container_width=True):
                 st.session_state.committee_session = session
                 st.rerun()
+            master_delete_control(
+                "sesión de Comité", str(session["id"]), f"committee_card_{session['id']}",
+                lambda session_id=str(session["id"]): delete_committee_session_master(client, session_id),
+            )
     st.markdown("---")
     with st.expander("＋ Crear nueva sesión", expanded=not sessions):
         with st.form(f"new_committee_session_{selected_committee}_{selected_year}", clear_on_submit=True):
@@ -2003,7 +2089,12 @@ def programs():
             else:
                 labels = {f"{p['nombre']} — {p['municipio']} ({p['anio_inicio']})": p for p in rows}
                 selected = st.selectbox("Selecciona el proyecto", labels)
-                project_form(direction, labels[selected])
+                selected_project = labels[selected]
+                master_delete_control(
+                    "proyecto", str(selected_project["id"]), f"project_{selected_project['id']}",
+                    lambda project_id=str(selected_project["id"]): delete_project_master(client, project_id),
+                )
+                project_form(direction, selected_project)
         except Exception as exc:
             st.error(f"No fue posible consultar los proyectos: {exc}")
 
@@ -2018,6 +2109,8 @@ if "user" not in st.session_state:
 else:
     with st.sidebar:
         st.markdown(brand_html(sidebar=True), unsafe_allow_html=True)
+        if is_master_admin():
+            st.success("Administrador maestro")
         if st.button("Inicio", use_container_width=True):
             st.session_state.page = "Inicio"
             st.rerun()
