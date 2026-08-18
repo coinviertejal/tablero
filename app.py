@@ -1143,7 +1143,62 @@ def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
             _pdf_preview(converted.read_bytes(), height)
             return True
     except Exception:
-        return False
+        pass
+    # Respaldo estable para Streamlit Cloud: python-pptx permite consultar el
+    # contenido aunque LibreOffice no esté disponible o rechace la conversión.
+    if suffix == ".pptx":
+        try:
+            presentation = Presentation(io.BytesIO(data))
+            if not presentation.slides:
+                st.info("La presentación no contiene diapositivas.")
+                return True
+            st.caption(f"Vista de contenido · {len(presentation.slides)} diapositiva(s)")
+            for slide_number, slide in enumerate(presentation.slides, start=1):
+                title = ""
+                blocks = []
+                for shape in slide.shapes:
+                    if not hasattr(shape, "text"):
+                        continue
+                    value = str(shape.text or "").strip()
+                    if not value:
+                        continue
+                    if getattr(slide.shapes, "title", None) is shape:
+                        title = value
+                    elif value not in blocks:
+                        blocks.append(value)
+                with st.container(border=True):
+                    st.markdown(f"##### {slide_number}. {html.escape(title or 'Diapositiva sin título')}")
+                    if blocks:
+                        for block in blocks:
+                            st.markdown(html.escape(block).replace("\n", "  \n"))
+                    else:
+                        st.caption("Esta diapositiva contiene principalmente elementos gráficos o imágenes.")
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _saved_main_document(client, document: dict, column, key_prefix: str) -> None:
+    """Acciones visibles para un documento principal que ya está guardado."""
+    filename = document.get("nombre_archivo") or "documento"
+    label = document.get("nombre_visible") or Path(filename).stem
+    column.success(f"Guardado: {label}")
+    try:
+        data = client.storage.from_("expedientes").download(document["ruta_storage"])
+        view_col, download_col = column.columns(2)
+        show = view_col.toggle("Previsualizar", key=f"{key_prefix}_view_{document['id']}")
+        download_col.download_button(
+            "Descargar", data, file_name=filename,
+            mime=document.get("mime_type") or "application/octet-stream",
+            key=f"{key_prefix}_download_{document['id']}", use_container_width=True,
+        )
+        if show:
+            with column.container(border=True):
+                if not _document_preview(data, filename, 520):
+                    st.info("No fue posible generar la vista previa, pero el archivo sí puede descargarse.")
+    except Exception:
+        column.error("El registro existe, pero el archivo no pudo recuperarse del almacenamiento.")
 
 
 def _document_card(client, document: dict, key_prefix: str, table_name: str):
@@ -1258,7 +1313,7 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption("Versión Junta Documental V10 · persistencia visible")
+    st.caption("Versión Junta Visor PPT V11 · vista y descarga persistentes")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     session_documents = (client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"])
@@ -1278,13 +1333,13 @@ def board_session_detail(session: dict):
     uploaded = media1.file_uploader("Convocatoria u orden del día", type=["docx", "pdf"], key=f"board_ingest_{session['id']}")
     session_ppt = media_ppt.file_uploader("Presentación de la sesión", type=["pptx"], key=f"board_presentation_{session['id']}")
     if latest_document.get("Convocatoria / orden del día"):
-        media1.success(f"Guardado: {latest_document['Convocatoria / orden del día'].get('nombre_visible') or latest_document['Convocatoria / orden del día'].get('nombre_archivo')}")
+        _saved_main_document(client, latest_document["Convocatoria / orden del día"], media1, "main_agenda")
     if latest_document.get("Presentación de la sesión"):
-        media_ppt.success(f"Guardado: {latest_document['Presentación de la sesión'].get('nombre_visible') or latest_document['Presentación de la sesión'].get('nombre_archivo')}")
+        _saved_main_document(client, latest_document["Presentación de la sesión"], media_ppt, "main_presentation")
     media2, media3 = st.columns(2)
     signed_minutes = media2.file_uploader("Acta firmada", type=["pdf"], key=f"signed_minutes_{session['id']}")
     if latest_document.get("Acta firmada"):
-        media2.success(f"Guardado: {latest_document['Acta firmada'].get('nombre_visible') or latest_document['Acta firmada'].get('nombre_archivo')}")
+        _saved_main_document(client, latest_document["Acta firmada"], media2, "main_minutes")
     video_url = media3.text_input("URL de la videograbación", value=session.get("videograbacion_url") or "",
                                   placeholder="https://…", key=f"video_url_{session['id']}")
     if media3.button("Guardar URL", key=f"save_video_{session['id']}", use_container_width=True):
