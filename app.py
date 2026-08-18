@@ -2608,12 +2608,20 @@ def _official_letter_card(client, document: dict):
 def official_letters_month(year: int, month: int, month_name: str):
     top1, top2 = st.columns([1, 5])
     if top1.button("← Meses", use_container_width=True, key=f"official_back_months_{year}_{month}"):
-        st.session_state.pop("official_month", None); st.rerun()
+        st.session_state.pop("official_month", None)
+        st.session_state.pop("official_list_mode", None)
+        st.rerun()
     top2.markdown(f"## Oficios Dirección General · {month_name} {year}")
+
     if not configured():
-        st.error("Primero debes conectar Supabase."); return
+        st.error("Primero debes conectar Supabase.")
+        return
+
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-    rows = client.table("oficios_direccion_general").select("*").eq("anio", year).eq("mes", month).order("fila_origen").order("created_at").execute().data or []
+    rows = (client.table("oficios_direccion_general").select("*")
+            .eq("anio", year).eq("mes", month)
+            .order("fila_origen").order("created_at").execute().data or [])
+
     signed_count = sum(bool(row.get("ruta_storage")) for row in rows)
     metrics_html = (
         '<div class="metric-grid">'
@@ -2624,16 +2632,78 @@ def official_letters_month(year: int, month: int, month_name: str):
         '</div>'
     )
     st.markdown(metrics_html, unsafe_allow_html=True)
-    term = st.text_input("Buscar dentro del mes", placeholder="Número, asunto, destinatario, dependencia, solicitante…", key=f"official_search_{year}_{month}").strip().lower()
+
+    # Selector de vista
+    if "official_list_mode" not in st.session_state:
+        st.session_state.official_list_mode = False
+
+    mode_col, _ = st.columns([1.4, 4.6])
+    if st.session_state.official_list_mode:
+        if mode_col.button("Vista modo tarjetas", key=f"official_cards_mode_{year}_{month}",
+                           use_container_width=True, type="primary"):
+            st.session_state.official_list_mode = False
+            st.rerun()
+    else:
+        if mode_col.button("Vista modo lista", key=f"official_list_mode_{year}_{month}",
+                           use_container_width=True, type="primary"):
+            st.session_state.official_list_mode = True
+            st.rerun()
+
+    term = st.text_input(
+        "Buscar dentro del mes",
+        placeholder="Número, asunto, destinatario, dependencia, solicitante…",
+        key=f"official_search_{year}_{month}",
+    ).strip().lower()
+
     filtered = rows
     if term:
-        filtered = [row for row in rows if term in " ".join([str(row.get("numero_oficio") or ""), str(row.get("folio_control") or ""), str(row.get("asunto") or ""), str(row.get("destinatario") or ""), str(row.get("cargo") or ""), str(row.get("dependencia") or ""), str(row.get("solicitado_por") or ""), str(row.get("status_control") or "")]).lower()]
+        filtered = [
+            row for row in rows
+            if term in " ".join([
+                str(row.get("numero_oficio") or ""),
+                str(row.get("folio_control") or ""),
+                str(row.get("asunto") or ""),
+                str(row.get("destinatario") or ""),
+                str(row.get("cargo") or ""),
+                str(row.get("dependencia") or ""),
+                str(row.get("solicitado_por") or ""),
+                str(row.get("status_control") or ""),
+            ]).lower()
+        ]
+
     st.markdown(f"### Oficios del mes · {len(filtered)}")
     if not filtered:
         st.info(f"No hay registros que mostrar en {month_name} de {year}.")
-    for row in filtered:
-        _official_letter_card(client, row)
+        return
 
+    if st.session_state.official_list_mode:
+        list_rows = []
+        for row in filtered:
+            list_rows.append({
+                "Número de oficio": row.get("numero_oficio") or "Sin número",
+                "Título / asunto": row.get("asunto") or "Sin asunto",
+                "Mes": f"{month_name} {year}",
+                "Destinatario": row.get("destinatario") or "Sin destinatario",
+                "Dependencia / organización destinataria": row.get("dependencia") or "Sin información",
+            })
+        st.dataframe(
+            pd.DataFrame(list_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Número de oficio": st.column_config.TextColumn("Número de oficio", width="medium"),
+                "Título / asunto": st.column_config.TextColumn("Título / asunto", width="large"),
+                "Mes": st.column_config.TextColumn("Mes", width="small"),
+                "Destinatario": st.column_config.TextColumn("Destinatario", width="medium"),
+                "Dependencia / organización destinataria": st.column_config.TextColumn(
+                    "Dependencia / organización destinataria", width="large"
+                ),
+            },
+        )
+        st.caption("Para abrir el expediente de un oficio o adjuntar el firmado, cambia a Vista modo tarjetas.")
+    else:
+        for row in filtered:
+            _official_letter_card(client, row)
 
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
@@ -2698,15 +2768,34 @@ def official_letters():
                 st.info(f"Última ingesta: **{latest.get('nombre_archivo') or 'Archivo'}** · {latest.get('registros_detectados') or 0} registro(s) · por **{latest.get('autor_nombre') or 'Usuario'}** · {when} · {latest.get('estado') or ''}")
     else:
         st.info("La ingesta del archivo de control estará disponible al conectar Supabase.")
+    year_counts = {year: 0 for year in OFFICIAL_LETTER_YEARS}
+    if configured():
+        try:
+            count_rows = client.table("oficios_direccion_general").select("anio").execute().data or []
+            for row in count_rows:
+                row_year = int(row.get("anio") or 0)
+                if row_year in year_counts:
+                    year_counts[row_year] += 1
+        except Exception:
+            pass
+
     colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)", "var(--blue)"]
     for start in (0, 3, 6):
         batch = OFFICIAL_LETTER_YEARS[start:start + 3]
         columns = st.columns(len(batch), gap="large")
         for column, year, color in zip(columns, batch, colors[start:start + len(batch)]):
             with column:
-                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p>Oficios</p></div>', unsafe_allow_html=True)
+                total_year = year_counts.get(year, 0)
+                label = "oficio" if total_year == 1 else "oficios"
+                st.markdown(
+                    f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p><b>{total_year}</b> {label}</p></div>',
+                    unsafe_allow_html=True,
+                )
                 if st.button(f"Abrir {year}", key=f"official_year_{year}", use_container_width=True, type="primary"):
-                    st.session_state.official_year = year; st.session_state.pop("official_month", None); st.rerun()
+                    st.session_state.official_year = year
+                    st.session_state.pop("official_month", None)
+                    st.session_state.pop("official_list_mode", None)
+                    st.rerun()
 
 def board_government():
     if not user_can(MODULE_BOARD):
