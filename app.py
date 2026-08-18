@@ -1621,12 +1621,197 @@ def board_year_dashboard(year: int):
                                 st.error(f"No fue posible agregar la sesión: {exc}")
 
 
+def _committee_items_from_text(text: str) -> list[dict]:
+    """Separa el orden del día y clasifica como acuerdo sólo la fórmula aprobatoria."""
+    items = _board_items_from_text(text)
+    results = []
+    approval_pattern = re.compile(
+        r"presentaci[oó]n\s+y\s*,?\s*en\s+su\s+caso\s*,?\s*aprobaci[oó]n",
+        re.I,
+    )
+    for item in items:
+        title = item.get("titulo") or ""
+        text_value = item.get("texto") or title
+        is_agreement = bool(approval_pattern.search(f"{title} {text_value}"))
+        results.append({
+            "tipo_registro": "Acuerdo" if is_agreement else "Informe",
+            "titulo": title,
+            "texto": text_value,
+            "Eliminar": False,
+        })
+    return results
+
+
+def committee_session_detail(session: dict, client):
+    """Expediente, puntos y seguimiento de una sesión de comité."""
+    if st.button("← Volver a sesiones", key=f"back_committee_session_{session['id']}"):
+        st.session_state.pop("committee_session", None)
+        st.rerun()
+    st.markdown(f"## {session.get('nombre') or 'Sesión'}")
+    st.caption(f"{session.get('comite')} · {session.get('tipo')} · {session.get('fecha_sesion') or 'Fecha pendiente'}")
+    st.caption("Versión Comités V13 · expediente, acuerdos y seguimiento")
+
+    try:
+        documents = (client.table("documentos_sesion_comite").select("*").eq("sesion_id", session["id"])
+                     .order("created_at").execute().data or [])
+    except Exception as exc:
+        st.error(f"Falta preparar el expediente de Comités en Supabase: {exc}")
+        return
+    latest = {}
+    for document in documents:
+        latest[document.get("tipo_documento")] = document
+
+    st.markdown("### Documentación de la sesión")
+    st.caption("La convocatoria permite generar los puntos; el acta queda integrada al expediente de la sesión.")
+    agenda_col, minutes_col = st.columns(2, gap="large")
+    agenda = agenda_col.file_uploader(
+        "Convocatoria u orden del día", type=["pdf", "docx"],
+        key=f"committee_agenda_{session['id']}",
+    )
+    minutes = minutes_col.file_uploader(
+        "Acta de la sesión", type=["pdf", "docx"],
+        key=f"committee_minutes_{session['id']}",
+    )
+    if latest.get("Convocatoria / orden del día"):
+        _saved_main_document(client, latest["Convocatoria / orden del día"], agenda_col, "committee_agenda_saved")
+    if latest.get("Acta de la sesión"):
+        _saved_main_document(client, latest["Acta de la sesión"], minutes_col, "committee_minutes_saved")
+    if agenda:
+        with agenda_col.expander("Previsualizar archivo seleccionado"):
+            if not _document_preview(agenda.getvalue(), agenda.name, 520):
+                st.info("No hay vista previa para este formato; puedes guardarlo y descargarlo desde el expediente.")
+    if minutes:
+        with minutes_col.expander("Previsualizar archivo seleccionado"):
+            if not _document_preview(minutes.getvalue(), minutes.name, 520):
+                st.info("No hay vista previa para este formato; puedes guardarlo y descargarlo desde el expediente.")
+
+    selected_documents = [item for item in (agenda, minutes) if item]
+    if st.button("Guardar documentación seleccionada", type="primary", use_container_width=True,
+                 disabled=not selected_documents, key=f"save_committee_docs_{session['id']}"):
+        specs = [(agenda, "Convocatoria / orden del día", "convocatoria"),
+                 (minutes, "Acta de la sesión", "acta")]
+        saved = 0
+        try:
+            with st.spinner("Guardando documentación…"):
+                for item, document_type, folder in specs:
+                    if not item:
+                        continue
+                    path = f"comites/{session['id']}/{folder}/{uuid.uuid4().hex}_{safe_name(item.name)}"
+                    _upload_junta_document(client, path, item)
+                    client.table("documentos_sesion_comite").insert({
+                        "sesion_id": session["id"], "tipo_documento": document_type,
+                        "nombre_visible": Path(item.name).stem, "nombre_archivo": item.name,
+                        "ruta_storage": path, "mime_type": item.type,
+                        "tamano_bytes": item.size, "subido_por": st.session_state.user["id"],
+                        "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"),
+                    }).execute()
+                    saved += 1
+            st.success(f"Se guardaron {saved} documento(s).")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Se guardaron {saved} documento(s), pero otro no pudo completarse: {exc}")
+
+    if agenda and st.button("Analizar y separar puntos de la convocatoria", type="primary",
+                            use_container_width=True, key=f"analyze_committee_{session['id']}"):
+        try:
+            extracted = _extract_board_text(agenda)
+            if not extracted.strip():
+                st.error("No se encontró texto legible en la convocatoria.")
+            else:
+                st.session_state[f"committee_draft_{session['id']}"] = _committee_items_from_text(extracted)
+                st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible leer la convocatoria: {exc}")
+
+    draft_key = f"committee_draft_{session['id']}"
+    if draft_key in st.session_state:
+        st.markdown("#### Revisión de puntos antes de guardar")
+        st.caption("Se marca como acuerdo únicamente el punto que contiene “Presentación y, en su caso, aprobación”. Puedes corregir la clasificación y el texto.")
+        edited = st.data_editor(
+            pd.DataFrame(st.session_state[draft_key]), use_container_width=True, hide_index=True,
+            num_rows="dynamic", key=f"committee_draft_editor_{session['id']}",
+            column_config={
+                "tipo_registro": st.column_config.SelectboxColumn("Tipo", options=["Acuerdo", "Informe"], required=True),
+                "titulo": st.column_config.TextColumn("Punto del orden del día", width="large", required=True),
+                "texto": st.column_config.TextColumn("Texto / descripción", width="large"),
+                "Eliminar": st.column_config.CheckboxColumn("Eliminar", default=False),
+            },
+        )
+        if st.button("Guardar puntos en la sesión", type="primary", use_container_width=True,
+                     key=f"save_committee_items_{session['id']}"):
+            rows = [row for row in edited.to_dict("records") if not row.get("Eliminar") and str(row.get("titulo") or "").strip()]
+            existing = client.table("acuerdos_comite").select("id").eq("sesion_id", session["id"]).execute().data or []
+            payload = []
+            for offset, row in enumerate(rows, len(existing) + 1):
+                payload.append({
+                    "sesion_id": session["id"], "numero": f"COM-{session.get('anio')}-{offset:03d}",
+                    "tipo_registro": row.get("tipo_registro") or "Informe",
+                    "titulo": str(row.get("titulo") or "").strip(),
+                    "texto": str(row.get("texto") or "").strip(), "areas": [],
+                    "estatus": "Por iniciar", "resultado": "Pendiente",
+                })
+            if payload:
+                client.table("acuerdos_comite").insert(payload).execute()
+            st.session_state.pop(draft_key, None)
+            st.success("Puntos guardados.")
+            st.rerun()
+
+    documents = (client.table("documentos_sesion_comite").select("*").eq("sesion_id", session["id"])
+                 .order("created_at").execute().data or [])
+    if documents:
+        st.markdown(f"#### Expediente documental · {len(documents)} documento(s)")
+        for document in documents:
+            _document_card(client, document, "committee_doc", "documentos_sesion_comite")
+
+    st.divider()
+    items = (client.table("acuerdos_comite").select("*").eq("sesion_id", session["id"])
+             .order("numero").execute().data or [])
+    st.markdown(f"### Acuerdos e informes ({len(items)})")
+    if not items:
+        st.info("Todavía no hay puntos guardados. Sube y analiza la convocatoria.")
+    for item in items:
+        is_report = item.get("tipo_registro") == "Informe"
+        status = item.get("estatus") or "Por iniciar"
+        tone = {"Por iniciar": "🔴", "En proceso": "🟡", "Terminada": "🟢"}.get(status, "⚪")
+        with st.expander(f"{tone} {item.get('numero')} · {item.get('titulo')}"):
+            st.caption(item.get("tipo_registro") or "Punto")
+            st.write(item.get("texto") or "Sin descripción adicional.")
+            if is_report:
+                st.info("Punto informativo: se conserva en el orden del día, pero no requiere seguimiento de acuerdo.")
+                continue
+            area_value = item.get("areas") or []
+            areas = st.multiselect("Áreas responsables", BOARD_AREAS, default=[a for a in area_value if a in BOARD_AREAS],
+                                   key=f"committee_areas_{item['id']}")
+            c1, c2, c3 = st.columns(3)
+            status_value = c1.selectbox("Estatus", ["Por iniciar", "En proceso", "Terminada"],
+                                        index=["Por iniciar", "En proceso", "Terminada"].index(status if status in ["Por iniciar", "En proceso", "Terminada"] else "Por iniciar"),
+                                        key=f"committee_status_{item['id']}")
+            result_value = c2.selectbox("Resultado", ["Pendiente", "Aprobado", "Rechazado"],
+                                        index=["Pendiente", "Aprobado", "Rechazado"].index(item.get("resultado") if item.get("resultado") in ["Pendiente", "Aprobado", "Rechazado"] else "Pendiente"),
+                                        key=f"committee_result_{item['id']}")
+            current_date = date.fromisoformat(str(item["fecha_compromiso"])[:10]) if item.get("fecha_compromiso") else None
+            deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}")
+            comment = st.text_area("Comentario de seguimiento", value=item.get("comentario_seguimiento") or "",
+                                   key=f"committee_comment_{item['id']}")
+            if st.button("Guardar cambios de seguimiento", type="primary", use_container_width=True,
+                         key=f"save_committee_followup_{item['id']}"):
+                client.table("acuerdos_comite").update({
+                    "areas": areas, "estatus": status_value, "resultado": result_value,
+                    "fecha_compromiso": deadline.isoformat() if deadline else None,
+                    "comentario_seguimiento": comment.strip() or None,
+                    "actualizado_por": st.session_state.user["id"],
+                }).eq("id", item["id"]).execute()
+                st.success("Seguimiento guardado.")
+                st.rerun()
+
+
 def committees():
     if not user_can(MODULE_COMMITTEES):
         st.error("No tienes permisos para acceder a Comités.")
         return
     selected_committee = st.session_state.get("committee_name")
     selected_year = st.session_state.get("committee_year")
+    selected_session = st.session_state.get("committee_session")
     if not selected_committee:
         st.markdown('<h1 class="choice-title">Comités</h1>', unsafe_allow_html=True)
         st.markdown('<p class="choice-subtitle">Selecciona el comité que deseas consultar</p>', unsafe_allow_html=True)
@@ -1645,6 +1830,7 @@ def committees():
         top1, top2 = st.columns([1, 5])
         if top1.button("← Comités", use_container_width=True):
             st.session_state.pop("committee_name", None)
+            st.session_state.pop("committee_session", None)
             st.rerun()
         top2.markdown(f"## {selected_committee}")
         st.markdown('<p class="choice-subtitle">Selecciona el año de trabajo</p>', unsafe_allow_html=True)
@@ -1655,14 +1841,19 @@ def committees():
                     <div class="year-label">Sesiones y documentación</div></div>''', unsafe_allow_html=True)
                 if st.button(f"Abrir {year}", key=f"committee_year_{selected_committee}_{year}", use_container_width=True):
                     st.session_state.committee_year = year
+                    st.session_state.pop("committee_session", None)
                     st.rerun()
         return
     top1, top2 = st.columns([1, 5])
     if top1.button("← Años", use_container_width=True):
         st.session_state.pop("committee_year", None)
+        st.session_state.pop("committee_session", None)
         st.rerun()
     top2.markdown(f"## {selected_committee} · {selected_year}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
+    if selected_session:
+        committee_session_detail(selected_session, client)
+        return
     sessions = []
     if configured():
         try:
@@ -1675,8 +1866,14 @@ def committees():
         st.info("Todavía no hay sesiones registradas para este comité y año.")
     for session in sessions:
         date_label = session.get("fecha_sesion") or "Fecha pendiente"
-        st.markdown(f'''<div class="session-card" style="--accent:var(--teal)"><h4>{html.escape(session.get("nombre") or "Sesión")}</h4>
-            <p>{html.escape(session.get("tipo") or "Sesión")} · <b>{html.escape(date_label)}</b></p></div>''', unsafe_allow_html=True)
+        with st.container(border=True):
+            info, action = st.columns([5, 1], vertical_alignment="center")
+            info.markdown(f"#### {html.escape(session.get('nombre') or 'Sesión')}")
+            info.caption(f"{session.get('tipo') or 'Sesión'} · {date_label}")
+            if action.button("Abrir sesión", key=f"open_committee_session_{session['id']}",
+                             type="primary", use_container_width=True):
+                st.session_state.committee_session = session
+                st.rerun()
     st.markdown("---")
     with st.expander("＋ Crear nueva sesión", expanded=not sessions):
         with st.form(f"new_committee_session_{selected_committee}_{selected_year}", clear_on_submit=True):
