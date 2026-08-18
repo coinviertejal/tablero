@@ -11,6 +11,7 @@ import tempfile
 import uuid
 
 import pandas as pd
+import altair as alt
 import streamlit as st
 import streamlit.components.v1 as components
 from docx import Document
@@ -95,12 +96,22 @@ st.markdown("""
 .status-red{--status-color:#b85c62}.status-yellow{--status-color:#c5a44a}.status-green{--status-color:#65a37a}.status-gray{--status-color:#858e93}
 .year-card { background:#fff; border:1px solid #dfe7e9; border-top:6px solid var(--accent,var(--blue)); border-radius:18px; padding:1.25rem; text-align:center; box-shadow:0 8px 22px rgba(53,67,75,.07); margin-top:.5rem; }
 .year-card h2 { font-size:2rem; margin:.1rem 0; color:var(--accent,var(--blue)); }
+.analytics-banner { margin:1.35rem 0 .35rem; padding:1.25rem 1.5rem; border-radius:18px; color:#fff;
+ background:linear-gradient(100deg,#173b63 0%,#0798cf 48%,#16ad8f 100%); box-shadow:0 12px 28px rgba(23,59,99,.2); }
+.analytics-banner h3 { margin:0 0 .2rem; font-size:1.35rem; }.analytics-banner p { margin:0; opacity:.88; }
+.analytics-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:15px; margin:1rem 0 1.7rem; }
+.analytics-metric { --tone:var(--blue); position:relative; overflow:hidden; background:#fff; border:1px solid #dfe7e9;
+ border-radius:18px; padding:1.15rem 1.25rem; min-height:125px; box-shadow:0 8px 22px rgba(53,67,75,.07); }
+.analytics-metric:before { content:""; position:absolute; left:0; top:0; bottom:0; width:7px; background:var(--tone); }
+.analytics-metric:after { content:""; position:absolute; width:88px; height:88px; border-radius:50%; right:-35px; top:-38px; background:color-mix(in srgb,var(--tone) 12%,white); }
+.analytics-value { font-size:2.35rem; line-height:1; font-weight:850; color:var(--tone); margin:.1rem 0 .65rem; }
+.analytics-label { color:#5f6c74; font-weight:700; line-height:1.3; max-width:90%; }
 .session-column { background:rgba(255,255,255,.72); border:1px solid #dfe7e9; border-radius:18px; padding:1rem 1rem .4rem; min-height:220px; }
 .session-card { background:#fff; border-left:7px solid var(--accent,var(--blue)); border-radius:13px; padding:1rem 1.1rem; margin:.7rem 0 .35rem; box-shadow:0 5px 16px rgba(53,67,75,.07); }
 .session-card h4 { margin:0 0 .25rem; font-size:1.08rem; }.session-card p { margin:0; color:#738087; font-size:.83rem; }
 [class*="st-key-session_open_"] div[data-testid="stButton"] button { background:#e7f4ec!important; border-color:#a8d3b7!important; color:#245c3b!important; font-weight:700; }
 [class*="st-key-session_open_"] div[data-testid="stButton"] button:hover { background:#d6ecdf!important; border-color:#79b78e!important; }
-@media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){.metric-grid,.analytics-metrics{grid-template-columns:repeat(2,1fr)}}
 div[data-testid="stForm"] { background:white; padding:1.55rem; border-radius:18px; border:1px solid #dfe7e9; box-shadow:0 8px 24px rgba(20,55,70,.045); }
 div[data-testid="stForm"] h3 { color:var(--gray); border-left:5px solid var(--orange); border-bottom:1px solid #e4ebed; padding:.15rem 0 .65rem .75rem; margin-top:1.2rem; }
 .stButton button, .stFormSubmitButton button { border-radius:10px; }
@@ -902,6 +913,72 @@ def board_year_selector():
                     st.session_state.board_year = year
                     st.session_state.pop("board_session", None)
                     st.rerun()
+    st.markdown('''<div class="analytics-banner"><h3>Analítica de datos</h3>
+        <p>Numeralia de sesiones y acuerdos, así como distribución del avance por áreas responsables.</p></div>''', unsafe_allow_html=True)
+    if st.button("Abrir Analítica de datos", key="open_board_analytics", use_container_width=True, type="primary"):
+        st.session_state.board_analytics = True
+        st.session_state.pop("board_year", None)
+        st.session_state.pop("board_session", None)
+        st.rerun()
+
+
+def board_analytics_dashboard():
+    top1, top2 = st.columns([1, 5])
+    if top1.button("← Junta", use_container_width=True):
+        st.session_state.pop("board_analytics", None)
+        st.rerun()
+    top2.markdown("## Analítica de datos · Junta de Gobierno")
+    scope = st.selectbox("Periodo de análisis", ["Todos los años"] + [str(year) for year in BOARD_YEARS])
+    selected_year = None if scope == "Todos los años" else int(scope)
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
+    if not client:
+        st.error("Primero debes conectar Supabase.")
+        return
+    try:
+        session_query = client.table("sesiones_junta").select("id,anio,fecha_sesion")
+        if selected_year: session_query = session_query.eq("anio", selected_year)
+        sessions = session_query.execute().data or []
+        session_ids = [row["id"] for row in sessions]
+        agreements = []
+        if session_ids:
+            agreements = (client.table("acuerdos_junta").select("id,sesion_id,tipo_registro,estatus,resultado,areas")
+                          .in_("sesion_id", session_ids).execute().data or [])
+    except Exception as exc:
+        st.error(f"No fue posible construir la analítica. Ejecuta la migración nueva y vuelve a intentar: {exc}")
+        return
+    agreements = [row for row in agreements if row.get("tipo_registro") == "Acuerdo"]
+    celebrated = sum(1 for row in sessions if row.get("fecha_sesion") and str(row["fecha_sesion"])[:10] <= date.today().isoformat())
+    counts = {
+        "Juntas de Gobierno celebradas": celebrated,
+        "Acuerdos aprobados": sum(row.get("resultado") == "Aprobado" for row in agreements),
+        "Acuerdos rechazados": sum(row.get("resultado") == "Rechazado" for row in agreements),
+        "Acuerdos por iniciar": sum(row.get("estatus") == "Por iniciar" for row in agreements),
+        "Acuerdos en progreso": sum(row.get("estatus") == "En proceso" for row in agreements),
+        "Acuerdos terminados": sum(row.get("estatus") == "Terminada" for row in agreements),
+    }
+    tones = ["#0798cf", "#009b4c", "#b85c62", "#f68b08", "#c5a44a", "#16ad8f"]
+    cards = "".join(f'''<div class="analytics-metric" style="--tone:{tone}"><div class="analytics-value">{value}</div>
+        <div class="analytics-label">{html.escape(label)}</div></div>''' for (label, value), tone in zip(counts.items(), tones))
+    st.markdown("### Numeralia")
+    st.caption("Cifras acumuladas de 2025–2030." if selected_year is None else f"Cifras correspondientes a {selected_year}.")
+    st.markdown(f'<div class="analytics-metrics">{cards}</div>', unsafe_allow_html=True)
+    pending_result = sum(row.get("resultado") in (None, "Pendiente") for row in agreements)
+    if pending_result:
+        st.info(f"Hay {pending_result} acuerdo(s) cuyo resultado todavía debe clasificarse como aprobado o rechazado.")
+    st.markdown("### Avance por áreas responsables")
+    st.caption("Cantidad de acuerdos asignados a cada dirección. Se excluyen Dirección General y Órgano Interno de Control.")
+    included_areas = [area for area in BOARD_AREAS if area not in ("Dirección General", "Órgano Interno de Control")]
+    area_data = [{"Dirección": area, "Acuerdos": sum(area in (row.get("areas") or []) for row in agreements)} for area in included_areas]
+    area_df = pd.DataFrame(area_data)
+    chart = (alt.Chart(area_df).mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7, size=54)
+             .encode(x=alt.X("Dirección:N", sort=included_areas, title=None, axis=alt.Axis(labelAngle=0, labelLimit=260)),
+                     y=alt.Y("Acuerdos:Q", title="Cantidad de acuerdos", axis=alt.Axis(tickMinStep=1)),
+                     color=alt.Color("Dirección:N", scale=alt.Scale(domain=included_areas,
+                         range=["#0798cf", "#009b4c", "#a990c7"]), legend=None),
+                     tooltip=[alt.Tooltip("Dirección:N"), alt.Tooltip("Acuerdos:Q", format=".0f")]))
+    labels = alt.Chart(area_df).mark_text(dy=-12, fontSize=15, fontWeight="bold", color="#35434b").encode(
+        x=alt.X("Dirección:N", sort=included_areas), y="Acuerdos:Q", text=alt.Text("Acuerdos:Q", format=".0f"))
+    st.altair_chart((chart + labels).properties(height=390), use_container_width=True)
 def _extract_board_text(uploaded) -> str:
     data = uploaded.getvalue()
     suffix = Path(uploaded.name).suffix.lower()
@@ -1270,6 +1347,10 @@ def board_session_detail(session: dict):
             display_statuses = {"Por iniciar": "Por iniciar", "En proceso": "En progreso", "Terminada": "Terminada"}
             new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
             new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
+            result_options = ["Pendiente", "Aprobado", "Rechazado"]
+            current_result = row.get("resultado") or "Pendiente"
+            new_result = current_result if is_report else st.selectbox("Resultado del acuerdo", result_options,
+                index=result_options.index(current_result), key=f"result_{row['id']}")
             if not is_report: c3.caption(_deadline_label(new_date.isoformat() if new_date else None, new_status))
             def save_follow_up():
                 close_date = row.get("fecha_cierre")
@@ -1279,7 +1360,7 @@ def board_session_detail(session: dict):
                     compliance = "En tiempo" if new_date and date.fromisoformat(str(close_date)[:10]) <= new_date else ("Extemporáneo" if new_date else "Sin fecha compromiso")
                 else:
                     close_date, compliance = None, None
-                client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "fecha_compromiso": new_date.isoformat() if new_date else None,
+                client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "resultado": new_result, "fecha_compromiso": new_date.isoformat() if new_date else None,
                     "fecha_cierre": close_date, "cumplimiento": compliance, "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute()
                 description = f"Estatus: {display_statuses[new_status]}; responsables: {', '.join(new_areas) or 'sin responsable'}; fecha compromiso: {new_date.isoformat() if new_date else 'sin fecha'}"
                 if compliance: description += f"; cumplimiento: {compliance}"
@@ -1524,7 +1605,9 @@ def board_government():
     if not user_can(MODULE_BOARD):
         st.error("No tienes permisos para acceder a Junta de Gobierno.")
         return
-    if st.session_state.get("board_session"):
+    if st.session_state.get("board_analytics"):
+        board_analytics_dashboard()
+    elif st.session_state.get("board_session"):
         board_session_detail(st.session_state.board_session)
     elif "board_year" in st.session_state:
         board_year_dashboard(int(st.session_state.board_year))
