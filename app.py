@@ -1934,6 +1934,86 @@ def committee_session_detail(session: dict, client):
                 st.rerun()
 
 
+def committee_analytics_dashboard(committee_name: str):
+    """Analítica aislada para el comité seleccionado."""
+    top1, top2 = st.columns([1, 5])
+    if top1.button("← Años", use_container_width=True, key="back_committee_analytics"):
+        st.session_state.pop("committee_analytics", None)
+        st.rerun()
+    top2.markdown(f"## Analítica de datos · {committee_name}")
+    st.caption("Versión Comités V16 · analítica individual por comité")
+    scope = st.selectbox(
+        "Periodo de análisis", ["Todos los años"] + [str(year) for year in BOARD_YEARS],
+        key=f"committee_analytics_scope_{committee_name}",
+    )
+    selected_year = None if scope == "Todos los años" else int(scope)
+    if not configured():
+        st.error("Primero debes conectar Supabase.")
+        return
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+    try:
+        session_query = (client.table("sesiones_comite").select("id,anio,fecha_sesion")
+                         .eq("comite", committee_name))
+        if selected_year:
+            session_query = session_query.eq("anio", selected_year)
+        sessions = session_query.execute().data or []
+        session_ids = [row["id"] for row in sessions]
+        agreements = []
+        if session_ids:
+            agreements = (client.table("acuerdos_comite")
+                          .select("id,sesion_id,tipo_registro,estatus,resultado,areas")
+                          .in_("sesion_id", session_ids).execute().data or [])
+    except Exception as exc:
+        st.error(f"No fue posible construir la analítica del comité: {exc}")
+        return
+    agreements = [row for row in agreements if row.get("tipo_registro") == "Acuerdo"]
+    today = date.today().isoformat()
+    celebrated = sum(1 for row in sessions if row.get("fecha_sesion") and str(row["fecha_sesion"])[:10] <= today)
+    counts = {
+        "Sesiones de Comité celebradas": celebrated,
+        "Acuerdos aprobados": sum(row.get("resultado") == "Aprobado" for row in agreements),
+        "Acuerdos rechazados": sum(row.get("resultado") == "Rechazado" for row in agreements),
+        "Acuerdos por iniciar": sum(row.get("estatus") == "Por iniciar" for row in agreements),
+        "Acuerdos en progreso": sum(row.get("estatus") == "En proceso" for row in agreements),
+        "Acuerdos terminados": sum(row.get("estatus") == "Terminada" for row in agreements),
+    }
+    tones = ["#0798cf", "#009b4c", "#b85c62", "#f68b08", "#c5a44a", "#16ad8f"]
+    cards = "".join(
+        f'''<div class="analytics-metric" style="--tone:{tone}">
+        <div class="analytics-value">{value}</div><div class="analytics-label">{html.escape(label)}</div></div>'''
+        for (label, value), tone in zip(counts.items(), tones)
+    )
+    st.markdown("### Numeralia")
+    st.caption(
+        f"Cifras acumuladas de {committee_name} para 2025–2030."
+        if selected_year is None else f"Cifras de {committee_name} correspondientes a {selected_year}."
+    )
+    st.markdown(f'<div class="analytics-metrics">{cards}</div>', unsafe_allow_html=True)
+    pending_result = sum(row.get("resultado") in (None, "Pendiente") for row in agreements)
+    if pending_result:
+        st.info(f"Hay {pending_result} acuerdo(s) pendientes de clasificar como aprobado o rechazado.")
+
+    st.markdown("### Avance por áreas responsables")
+    st.caption("Cantidad de acuerdos asignados a cada dirección. Se excluyen Dirección General y Órgano Interno de Control.")
+    included_areas = [area for area in BOARD_AREAS if area not in ("Dirección General", "Órgano Interno de Control")]
+    area_data = [
+        {"Dirección": area, "Acuerdos": sum(area in (row.get("areas") or []) for row in agreements)}
+        for area in included_areas
+    ]
+    area_df = pd.DataFrame(area_data)
+    chart = (alt.Chart(area_df).mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7, size=54)
+             .encode(
+                 x=alt.X("Dirección:N", sort=included_areas, title=None, axis=alt.Axis(labelAngle=0, labelLimit=260)),
+                 y=alt.Y("Acuerdos:Q", title="Cantidad de acuerdos", axis=alt.Axis(tickMinStep=1)),
+                 color=alt.Color("Dirección:N", scale=alt.Scale(
+                     domain=included_areas, range=["#0798cf", "#009b4c", "#a990c7"]), legend=None),
+                 tooltip=[alt.Tooltip("Dirección:N"), alt.Tooltip("Acuerdos:Q", format=".0f")],
+             ))
+    labels = alt.Chart(area_df).mark_text(dy=-12, fontSize=15, fontWeight="bold", color="#35434b").encode(
+        x=alt.X("Dirección:N", sort=included_areas), y="Acuerdos:Q", text=alt.Text("Acuerdos:Q", format=".0f"))
+    st.altair_chart((chart + labels).properties(height=390), use_container_width=True)
+
+
 def committees():
     if not user_can(MODULE_COMMITTEES):
         st.error("No tienes permisos para acceder a Comités.")
@@ -1953,25 +2033,40 @@ def committees():
                     if st.button(f"Abrir {name}", key=f"open_committee_{name}", use_container_width=True, type="primary"):
                         st.session_state.committee_name = name
                         st.session_state.pop("committee_year", None)
+                        st.session_state.pop("committee_analytics", None)
                         st.rerun()
+        return
+    if st.session_state.get("committee_analytics"):
+        committee_analytics_dashboard(selected_committee)
         return
     if selected_year is None:
         top1, top2 = st.columns([1, 5])
         if top1.button("← Comités", use_container_width=True):
             st.session_state.pop("committee_name", None)
             st.session_state.pop("committee_session", None)
+            st.session_state.pop("committee_analytics", None)
             st.rerun()
         top2.markdown(f"## {selected_committee}")
         st.markdown('<p class="choice-subtitle">Selecciona el año de trabajo</p>', unsafe_allow_html=True)
         year_columns = st.columns(3, gap="large")
+        year_colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
         for index, year in enumerate(range(2025, 2031)):
             with year_columns[index % 3]:
-                st.markdown(f'''<div class="year-card"><div class="year-number">{year}</div>
-                    <div class="year-label">Sesiones y documentación</div></div>''', unsafe_allow_html=True)
+                st.markdown(f'''<div class="year-card" style="--accent:{year_colors[index]}">
+                    <h2>{year}</h2><p>Sesiones, acuerdos y documentación</p></div>''', unsafe_allow_html=True)
                 if st.button(f"Abrir {year}", key=f"committee_year_{selected_committee}_{year}", use_container_width=True):
                     st.session_state.committee_year = year
                     st.session_state.pop("committee_session", None)
                     st.rerun()
+        st.markdown(f'''<div class="analytics-banner"><h3>Analítica de datos · {html.escape(selected_committee)}</h3>
+            <p>Numeralia de sesiones y acuerdos, así como distribución del avance por áreas responsables.</p></div>''',
+            unsafe_allow_html=True)
+        if st.button("Abrir Analítica de datos", key=f"open_committee_analytics_{selected_committee}",
+                     use_container_width=True, type="primary"):
+            st.session_state.committee_analytics = True
+            st.session_state.pop("committee_year", None)
+            st.session_state.pop("committee_session", None)
+            st.rerun()
         return
     top1, top2 = st.columns([1, 5])
     if top1.button("← Años", use_container_width=True):
@@ -2176,6 +2271,10 @@ else:
         if user_can(MODULE_COMMITTEES):
             if st.button("Comités", use_container_width=True):
                 st.session_state.page = "Comités"
+                st.session_state.pop("committee_name", None)
+                st.session_state.pop("committee_year", None)
+                st.session_state.pop("committee_session", None)
+                st.session_state.pop("committee_analytics", None)
                 st.rerun()
         if st.session_state.user.get("rol") == "administrador":
             if st.button("Gestión de usuarios", use_container_width=True):
