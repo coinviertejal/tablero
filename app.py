@@ -38,7 +38,8 @@ from exports import build_docx, build_pdf
 MODULE_PROJECTS = "Programas / Proyectos"
 MODULE_BOARD = "Junta de Gobierno"
 MODULE_COMMITTEES = "Comités"
-ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES]
+MODULE_OFFICIAL_LETTERS = "Oficios Dirección General"
+ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES, MODULE_OFFICIAL_LETTERS]
 USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
 MASTER_ADMIN_EMAIL = "yani.limberopulos@jalisco.gob.mx"
@@ -318,12 +319,13 @@ def landing():
         ("01", "Programas / Proyectos", "Alta, consulta, edición y seguimiento de expedientes."),
         ("02", "Junta de Gobierno", "Actas, acuerdos y documentación de las sesiones."),
         ("03", "Comités", "Integración, sesiones, actas y dictaminación."),
+        ("04", "Oficios Dirección General", "Archivo anual y mensual de los oficios firmados por la Dirección General."),
     ] if user_can(item[1])]
     if not sections:
         st.info("Tu cuenta está activa, pero todavía no tiene módulos asignados. Solicita al administrador que configure tus permisos.")
         return
     cols = st.columns(len(sections))
-    card_styles = ["card-blue", "card-green", "card-purple"]
+    card_styles = ["card-blue", "card-green", "card-purple", "card-blue"]
     for col, (icon, title, text), card_style in zip(cols, sections, card_styles):
         with col:
             st.markdown(f'<div class="card {card_style}"><div class="card-icon">{icon}</div><h3>{title}</h3><p class="muted">{text}</p></div>', unsafe_allow_html=True)
@@ -2376,6 +2378,249 @@ def committees():
                     st.error(f"No fue posible crear la sesión: {exc}")
 
 
+OFFICIAL_LETTER_YEARS = list(range(2024, 2031))
+MONTHS_ES = [
+    (1, "Enero"), (2, "Febrero"), (3, "Marzo"), (4, "Abril"),
+    (5, "Mayo"), (6, "Junio"), (7, "Julio"), (8, "Agosto"),
+    (9, "Septiembre"), (10, "Octubre"), (11, "Noviembre"), (12, "Diciembre"),
+]
+
+
+def _delete_official_letter(client, document: dict) -> None:
+    if document.get("ruta_storage"):
+        _remove_storage_paths(client, [document["ruta_storage"]])
+    client.table("oficios_direccion_general").delete().eq("id", document["id"]).execute()
+
+
+def _official_letter_card(client, document: dict):
+    filename = document.get("nombre_archivo") or "oficio"
+    office_number = document.get("numero_oficio") or "Sin número"
+    subject = document.get("asunto") or Path(filename).stem
+    date_label = str(document.get("fecha_oficio") or "")[:10] or "Sin fecha"
+    recipient = document.get("destinatario") or "Sin destinatario"
+
+    with st.container(border=True):
+        info, actions = st.columns([4.5, 2.2], vertical_alignment="center")
+        info.markdown(f"**{html.escape(office_number)} · {html.escape(subject)}**")
+        info.caption(
+            f"{date_label} · Destinatario: {html.escape(recipient)}  \n"
+            f"Archivo: {html.escape(filename)} · Cargado por {html.escape(document.get('autor_nombre') or 'Usuario')}"
+        )
+        try:
+            data = client.storage.from_("expedientes").download(document["ruta_storage"])
+            action_cols = actions.columns(3 if is_master_admin() else 2)
+            show = action_cols[0].toggle("Ver", key=f"official_view_{document['id']}")
+            action_cols[1].download_button(
+                "Descargar", data, file_name=filename,
+                mime=document.get("mime_type") or "application/octet-stream",
+                key=f"official_download_{document['id']}", use_container_width=True,
+            )
+
+            if is_master_admin():
+                pending_key = f"official_delete_pending_{document['id']}"
+                if action_cols[2].button("Eliminar", key=f"official_delete_{document['id']}", use_container_width=True):
+                    st.session_state[pending_key] = True
+                    st.rerun()
+                if st.session_state.get(pending_key):
+                    st.warning(f"¿Eliminar definitivamente el oficio {office_number}?")
+                    yes_col, no_col, _ = st.columns([1, 1, 4])
+                    if yes_col.button("Sí, eliminar", key=f"official_confirm_delete_{document['id']}", type="primary"):
+                        _delete_official_letter(client, document)
+                        st.session_state.pop(pending_key, None)
+                        st.success("Oficio eliminado.")
+                        st.rerun()
+                    if no_col.button("Cancelar", key=f"official_cancel_delete_{document['id']}"):
+                        st.session_state.pop(pending_key, None)
+                        st.rerun()
+
+            if show:
+                st.markdown("##### Vista previa")
+                if not _document_preview(data, filename, 650):
+                    st.info("La vista previa no está disponible para este formato.")
+        except Exception:
+            actions.caption("No fue posible recuperar el archivo.")
+
+
+def official_letters_month(year: int, month: int, month_name: str):
+    top1, top2 = st.columns([1, 5])
+    if top1.button("← Meses", use_container_width=True, key=f"official_back_months_{year}_{month}"):
+        st.session_state.pop("official_month", None)
+        st.rerun()
+    top2.markdown(f"## Oficios Dirección General · {month_name} {year}")
+
+    if not configured():
+        st.error("Primero debes conectar Supabase.")
+        return
+
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+
+    st.markdown("### Cargar oficio firmado")
+    st.caption("Registra los datos principales y adjunta el documento firmado. El archivo quedará dentro del expediente del mes.")
+    with st.form(f"new_official_letter_{year}_{month}", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        office_number = c1.text_input("Número de oficio", placeholder="Ej. DG/123/2026")
+        office_date = c2.date_input("Fecha del oficio", value=date(year, month, 1))
+        subject = st.text_input("Asunto *")
+        recipient = st.text_input("Destinatario")
+        notes = st.text_area("Notas / descripción", height=85)
+        uploaded = st.file_uploader(
+            "Oficio firmado *",
+            type=["pdf", "docx", "jpg", "jpeg", "png"],
+            key=f"official_upload_{year}_{month}",
+        )
+        save_office = st.form_submit_button("Guardar oficio", type="primary", use_container_width=True)
+
+    if save_office:
+        if not subject.strip():
+            st.error("Escribe el asunto del oficio.")
+        elif not uploaded:
+            st.error("Adjunta el oficio firmado.")
+        elif office_date.year != year or office_date.month != month:
+            st.error(f"La fecha del oficio debe corresponder a {month_name} de {year}.")
+        else:
+            try:
+                path = f"oficios_direccion_general/{year}/{month:02d}/{uuid.uuid4().hex}_{safe_name(uploaded.name)}"
+                _upload_junta_document(client, path, uploaded)
+                client.table("oficios_direccion_general").insert({
+                    "anio": year,
+                    "mes": month,
+                    "numero_oficio": office_number.strip() or None,
+                    "fecha_oficio": office_date.isoformat(),
+                    "asunto": subject.strip(),
+                    "destinatario": recipient.strip() or None,
+                    "notas": notes.strip() or None,
+                    "nombre_archivo": uploaded.name,
+                    "ruta_storage": path,
+                    "mime_type": uploaded.type,
+                    "tamano_bytes": uploaded.size,
+                    "subido_por": st.session_state.user["id"],
+                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"),
+                }).execute()
+                st.success("Oficio guardado correctamente.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No fue posible guardar el oficio: {exc}")
+
+    rows = (client.table("oficios_direccion_general").select("*")
+            .eq("anio", year).eq("mes", month)
+            .order("fecha_oficio", desc=True).order("created_at", desc=True)
+            .execute().data or [])
+
+    st.markdown(f"### Oficios firmados · {len(rows)}")
+    if not rows:
+        st.info(f"Todavía no hay oficios registrados en {month_name} de {year}.")
+        return
+
+    term = st.text_input(
+        "Buscar dentro del mes",
+        placeholder="Número, asunto, destinatario…",
+        key=f"official_search_{year}_{month}",
+    ).strip().lower()
+
+    filtered = rows
+    if term:
+        filtered = [
+            row for row in rows
+            if term in " ".join([
+                str(row.get("numero_oficio") or ""),
+                str(row.get("asunto") or ""),
+                str(row.get("destinatario") or ""),
+                str(row.get("notas") or ""),
+            ]).lower()
+        ]
+
+    st.caption(f"{len(filtered)} resultado(s)" if term else f"{len(rows)} oficio(s) en el expediente mensual.")
+    for row in filtered:
+        _official_letter_card(client, row)
+
+
+def official_letters_year(year: int):
+    top1, top2 = st.columns([1, 5])
+    if top1.button("← Años", use_container_width=True, key=f"official_back_years_{year}"):
+        st.session_state.pop("official_year", None)
+        st.session_state.pop("official_month", None)
+        st.rerun()
+    top2.markdown(f"## Oficios Dirección General · {year}")
+    st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
+
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
+    counts = {month: 0 for month, _ in MONTHS_ES}
+
+    if client:
+        try:
+            rows = client.table("oficios_direccion_general").select("mes").eq("anio", year).execute().data or []
+            for row in rows:
+                month_value = int(row.get("mes") or 0)
+                if month_value in counts:
+                    counts[month_value] += 1
+        except Exception:
+            pass
+
+    colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
+
+    for start in range(0, 12, 3):
+        columns = st.columns(3, gap="large")
+        batch = MONTHS_ES[start:start + 3]
+        for offset, (month, month_name) in enumerate(batch):
+            color = colors[(start + offset) % len(colors)]
+            with columns[offset]:
+                st.markdown(
+                    f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{counts.get(month, 0)} oficio(s) firmado(s)</p></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    f"Abrir {month_name}",
+                    key=f"official_month_{year}_{month}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state.official_month = month
+                    st.rerun()
+
+
+def official_letters():
+    if not user_can(MODULE_OFFICIAL_LETTERS):
+        st.error("No tienes permisos para acceder a Oficios Dirección General.")
+        return
+
+    selected_year = st.session_state.get("official_year")
+    selected_month = st.session_state.get("official_month")
+
+    if selected_year and selected_month:
+        month_name = dict(MONTHS_ES).get(int(selected_month), str(selected_month))
+        official_letters_month(int(selected_year), int(selected_month), month_name)
+        return
+
+    if selected_year:
+        official_letters_year(int(selected_year))
+        return
+
+    st.markdown('<h1 class="choice-title">Oficios Dirección General</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="choice-subtitle">Archivo institucional de oficios firmados · selecciona el año</p>',
+        unsafe_allow_html=True,
+    )
+
+    colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)", "var(--blue)"]
+    for start in (0, 3, 6):
+        batch = OFFICIAL_LETTER_YEARS[start:start + 3]
+        columns = st.columns(len(batch), gap="large")
+        for column, year, color in zip(columns, batch, colors[start:start + len(batch)]):
+            with column:
+                st.markdown(
+                    f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p>Oficios firmados</p></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    f"Abrir {year}",
+                    key=f"official_year_{year}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state.official_year = year
+                    st.session_state.pop("official_month", None)
+                    st.rerun()
+
 def board_government():
     if not user_can(MODULE_BOARD):
         st.error("No tienes permisos para acceder a Junta de Gobierno.")
@@ -2527,6 +2772,12 @@ else:
                 st.session_state.pop("committee_session", None)
                 st.session_state.pop("committee_analytics", None)
                 st.rerun()
+        if user_can(MODULE_OFFICIAL_LETTERS):
+            if st.button("Oficios Dirección General", use_container_width=True):
+                st.session_state.page = "Oficios Dirección General"
+                st.session_state.pop("official_year", None)
+                st.session_state.pop("official_month", None)
+                st.rerun()
         if st.session_state.user.get("rol") == "administrador":
             if st.button("Gestión de usuarios", use_container_width=True):
                 st.session_state.page = "Gestión de usuarios"
@@ -2542,4 +2793,6 @@ else:
     elif page == "Gestión de usuarios": user_management()
     elif page == "Comités" and user_can(MODULE_COMMITTEES): committees()
     elif page == "Comités": st.error("No tienes permisos para acceder a Comités.")
+    elif page == "Oficios Dirección General" and user_can(MODULE_OFFICIAL_LETTERS): official_letters()
+    elif page == "Oficios Dirección General": st.error("No tienes permisos para acceder a Oficios Dirección General.")
     else: landing()
