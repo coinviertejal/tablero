@@ -1258,9 +1258,14 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption("Versión Junta Expediente V6 · gestión documental")
+    st.caption("Versión Junta Documental V10 · persistencia visible")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+    session_documents = (client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"])
+                         .order("created_at").execute().data or [])
+    latest_document = {}
+    for saved_document in session_documents:
+        latest_document[saved_document.get("tipo_documento")] = saved_document
     session_date = st.date_input("Fecha de la sesión", value=date.fromisoformat(session["fecha_sesion"][:10]) if session.get("fecha_sesion") else None,
                                  key=f"session_date_{session['id']}")
     if st.button("Guardar fecha de la sesión", key=f"save_session_date_{session['id']}"):
@@ -1272,8 +1277,14 @@ def board_session_detail(session: dict):
     media1, media_ppt = st.columns(2)
     uploaded = media1.file_uploader("Convocatoria u orden del día", type=["docx", "pdf"], key=f"board_ingest_{session['id']}")
     session_ppt = media_ppt.file_uploader("Presentación de la sesión", type=["pptx"], key=f"board_presentation_{session['id']}")
+    if latest_document.get("Convocatoria / orden del día"):
+        media1.success(f"Guardado: {latest_document['Convocatoria / orden del día'].get('nombre_visible') or latest_document['Convocatoria / orden del día'].get('nombre_archivo')}")
+    if latest_document.get("Presentación de la sesión"):
+        media_ppt.success(f"Guardado: {latest_document['Presentación de la sesión'].get('nombre_visible') or latest_document['Presentación de la sesión'].get('nombre_archivo')}")
     media2, media3 = st.columns(2)
     signed_minutes = media2.file_uploader("Acta firmada", type=["pdf"], key=f"signed_minutes_{session['id']}")
+    if latest_document.get("Acta firmada"):
+        media2.success(f"Guardado: {latest_document['Acta firmada'].get('nombre_visible') or latest_document['Acta firmada'].get('nombre_archivo')}")
     video_url = media3.text_input("URL de la videograbación", value=session.get("videograbacion_url") or "",
                                   placeholder="https://…", key=f"video_url_{session['id']}")
     if media3.button("Guardar URL", key=f"save_video_{session['id']}", use_container_width=True):
@@ -1291,42 +1302,34 @@ def board_session_detail(session: dict):
         with media_ppt.expander("Previsualizar presentación"):
             if not _document_preview(session_ppt.getvalue(), session_ppt.name, 520):
                 st.info("No fue posible convertir esta presentación para previsualizarla.")
-    if uploaded and media1.button("Guardar convocatoria", key=f"save_notice_{session['id']}", use_container_width=True):
-        path = f"junta/{session['id']}/documentos/{uuid.uuid4().hex}_{safe_name(uploaded.name)}"
+    selected_documents = [item for item in [uploaded, session_ppt, signed_minutes] if item]
+    if st.button("Guardar documentación seleccionada", type="primary", use_container_width=True,
+                 disabled=not selected_documents, key=f"save_main_documents_{session['id']}"):
+        document_specs = [
+            (uploaded, "Convocatoria / orden del día", "documentos"),
+            (session_ppt, "Presentación de la sesión", "presentacion"),
+            (signed_minutes, "Acta firmada", "acta_firmada"),
+        ]
+        saved_count = 0
         try:
-            _upload_junta_document(client, path, uploaded)
-            client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Convocatoria / orden del día",
-                "nombre_visible": Path(uploaded.name).stem, "nombre_archivo": uploaded.name, "ruta_storage": path,
-                "mime_type": uploaded.type, "tamano_bytes": uploaded.size, "subido_por": st.session_state.user["id"],
-                "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
-            st.success("Convocatoria guardada."); st.rerun()
+            with st.spinner(f"Guardando {len(selected_documents)} documento(s)…"):
+                for item, document_type, folder in document_specs:
+                    if not item:
+                        continue
+                    path = f"junta/{session['id']}/{folder}/{uuid.uuid4().hex}_{safe_name(item.name)}"
+                    _upload_junta_document(client, path, item)
+                    client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": document_type,
+                        "nombre_visible": Path(item.name).stem, "nombre_archivo": item.name, "ruta_storage": path,
+                        "mime_type": item.type, "tamano_bytes": item.size, "subido_por": st.session_state.user["id"],
+                        "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
+                    if document_type == "Acta firmada":
+                        client.table("sesiones_junta").update({"acta_firmada_nombre": item.name, "acta_firmada_ruta": path}).eq("id", session["id"]).execute()
+                        st.session_state.board_session.update({"acta_firmada_nombre": item.name, "acta_firmada_ruta": path})
+                    saved_count += 1
+            st.success(f"Se guardaron {saved_count} documento(s) en el expediente.")
+            st.rerun()
         except Exception:
-            st.error("No fue posible guardar la convocatoria. Puedes volver a intentarlo sin salir de la sesión.")
-    if session_ppt and media_ppt.button("Guardar presentación", key=f"save_presentation_{session['id']}", use_container_width=True):
-        path = f"junta/{session['id']}/presentacion/{uuid.uuid4().hex}_{safe_name(session_ppt.name)}"
-        try:
-            with st.spinner("Guardando presentación por bloques…"):
-                _upload_junta_document(client, path, session_ppt)
-                client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Presentación de la sesión",
-                    "nombre_visible": Path(session_ppt.name).stem, "nombre_archivo": session_ppt.name, "ruta_storage": path,
-                    "mime_type": session_ppt.type, "tamano_bytes": session_ppt.size, "subido_por": st.session_state.user["id"],
-                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
-            st.success("Presentación guardada."); st.rerun()
-        except Exception:
-            st.error("No fue posible guardar la presentación. Puedes volver a intentarlo sin salir de la sesión.")
-    if signed_minutes and media2.button("Guardar acta firmada", key=f"save_minutes_{session['id']}", use_container_width=True):
-        path = f"junta/{session['id']}/acta_firmada/{uuid.uuid4().hex}_{safe_name(signed_minutes.name)}"
-        try:
-            _upload_junta_document(client, path, signed_minutes)
-            client.table("sesiones_junta").update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path}).eq("id", session["id"]).execute()
-            client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Acta firmada",
-                "nombre_visible": Path(signed_minutes.name).stem, "nombre_archivo": signed_minutes.name, "ruta_storage": path,
-                "mime_type": signed_minutes.type, "tamano_bytes": signed_minutes.size, "subido_por": st.session_state.user["id"],
-                "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
-            st.session_state.board_session.update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path})
-            st.success("Acta firmada guardada.")
-        except Exception:
-            st.error("No fue posible guardar el acta. Puedes volver a intentarlo sin salir de la sesión.")
+            st.error(f"Se guardaron {saved_count} documento(s), pero uno no pudo completarse. Los ya guardados permanecen en el expediente.")
     if session.get("acta_firmada_ruta"):
         try:
             minutes_data = client.storage.from_("expedientes").download(session["acta_firmada_ruta"])
