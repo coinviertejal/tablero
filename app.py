@@ -79,7 +79,13 @@ def delete_board_session_master(client, session_id: str) -> None:
 
 def delete_committee_session_master(client, session_id: str) -> None:
     documents = client.table("documentos_sesion_comite").select("ruta_storage").eq("sesion_id", session_id).execute().data or []
-    _remove_storage_paths(client, [row.get("ruta_storage") for row in documents])
+    agreements = client.table("acuerdos_comite").select("id").eq("sesion_id", session_id).execute().data or []
+    agreement_ids = [row["id"] for row in agreements]
+    followup_files = []
+    if agreement_ids:
+        followup_files = (client.table("archivos_acuerdo_comite").select("ruta_storage")
+                          .in_("acuerdo_id", agreement_ids).execute().data or [])
+    _remove_storage_paths(client, [row.get("ruta_storage") for row in documents + followup_files])
     client.table("sesiones_comite").delete().eq("id", session_id).execute()
 
 
@@ -1726,7 +1732,7 @@ def committee_session_detail(session: dict, client):
         st.rerun()
     st.markdown(f"## {session.get('nombre') or 'Sesión'}")
     st.caption(f"{session.get('comite')} · {session.get('tipo')} · {session.get('fecha_sesion') or 'Fecha pendiente'}")
-    st.caption("Versión Comités V13 · expediente, acuerdos y seguimiento")
+    st.caption("Versión Comités V15 · expediente y documentos de seguimiento")
     master_delete_control(
         "sesión de Comité", str(session["id"]), f"committee_detail_{session['id']}",
         lambda: (delete_committee_session_master(client, str(session["id"])),
@@ -1875,6 +1881,47 @@ def committee_session_detail(session: dict, client):
             deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}")
             comment = st.text_area("Comentario de seguimiento", value=item.get("comentario_seguimiento") or "",
                                    key=f"committee_comment_{item['id']}")
+            st.markdown("#### Documentos de seguimiento")
+            st.caption("Adjunta evidencias, oficios, informes o entregables vinculados exclusivamente a este acuerdo.")
+            file_name_col, file_col = st.columns([2, 3])
+            visible_name = file_name_col.text_input(
+                "Nombre descriptivo del documento",
+                placeholder="Ej. Evidencia de cumplimiento del acuerdo",
+                key=f"committee_followup_name_{item['id']}",
+            )
+            followup_file = file_col.file_uploader(
+                "Archivo", type=["pdf", "docx", "xlsx", "xls", "pptx", "jpg", "jpeg", "png"],
+                key=f"committee_followup_file_{item['id']}",
+            )
+            if st.button(
+                "Agregar documento al seguimiento", use_container_width=True,
+                key=f"upload_committee_followup_{item['id']}",
+                disabled=not followup_file or not visible_name.strip(),
+            ):
+                try:
+                    path = f"comites/acuerdos/{item['id']}/{uuid.uuid4().hex}_{safe_name(followup_file.name)}"
+                    _upload_junta_document(client, path, followup_file)
+                    client.table("archivos_acuerdo_comite").insert({
+                        "acuerdo_id": item["id"], "nombre_visible": visible_name.strip(),
+                        "nombre_archivo": followup_file.name, "ruta_storage": path,
+                        "mime_type": followup_file.type, "tamano_bytes": followup_file.size,
+                        "subido_por": st.session_state.user["id"],
+                        "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"),
+                    }).execute()
+                    st.success("Documento incorporado al seguimiento.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible guardar el documento: {exc}")
+
+            followup_documents = (client.table("archivos_acuerdo_comite").select("*")
+                                  .eq("acuerdo_id", item["id"]).order("created_at").execute().data or [])
+            if followup_documents:
+                st.caption(f"Expediente del acuerdo · {len(followup_documents)} documento(s)")
+                for document in followup_documents:
+                    document["tipo_documento"] = "Seguimiento del acuerdo"
+                    _document_card(client, document, "committee_followup_doc", "archivos_acuerdo_comite")
+            else:
+                st.info("Este acuerdo todavía no tiene documentos de seguimiento.")
             if st.button("Guardar cambios de seguimiento", type="primary", use_container_width=True,
                          key=f"save_committee_followup_{item['id']}"):
                 client.table("acuerdos_comite").update({
