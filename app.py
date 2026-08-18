@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import base64
 import html
+import hashlib
 import io
 from pathlib import Path
 import re
@@ -2386,150 +2387,240 @@ MONTHS_ES = [
 ]
 
 
+def _control_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _control_bool(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, bool):
+        return value
+    text_value = str(value).strip().lower()
+    if text_value in ("true", "sí", "si", "1", "x"):
+        return True
+    if text_value in ("false", "no", "0"):
+        return False
+    return None
+
+
+def _control_date(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date().isoformat()
+    except Exception:
+        return None
+
+
+def _office_period_from_number(office_number: str) -> tuple[int, int] | None:
+    match = re.search(r"(\d{2})\D*(\d{4})\s*$", str(office_number or "").strip())
+    if not match:
+        return None
+    month, year = int(match.group(1)), int(match.group(2))
+    if month < 1 or month > 12 or year < 2024 or year > 2030:
+        return None
+    return month, year
+
+
+def _parse_dg_control_excel(uploaded) -> tuple[list[dict], list[str]]:
+    frame = pd.read_excel(uploaded, sheet_name="ENVIADOS DG", header=1, dtype=object)
+    frame.columns = [str(column).strip().upper() for column in frame.columns]
+    expected = ["NO", "OFICIO", "DIRIGIDO A", "CARGO", "DEPENDENCIA", "ASUNTO", "FECHA", "FIRMA", "SOLICITADO POR", "STATUS", "A. FISICO", "A.DIGITAL"]
+    normalized = {name: name for name in expected if name in frame.columns}
+    if "OFICIO" not in normalized:
+        raise ValueError("La hoja ENVIADOS DG no contiene la columna OFICIO esperada.")
+    records, warnings = [], []
+    for index, row in frame.iterrows():
+        excel_row = int(index) + 3
+        office_number = _control_text(row.get(normalized["OFICIO"]))
+        if not office_number:
+            continue
+        period = _office_period_from_number(office_number)
+        if not period:
+            warnings.append(f"Fila {excel_row}: no se pudo identificar mes/año en {office_number}.")
+            continue
+        month, year = period
+        control_folio = _control_text(row.get(normalized.get("NO"))) if normalized.get("NO") else ""
+        key_suffix = control_folio or str(excel_row)
+        records.append({
+            "anio": year,
+            "mes": month,
+            "numero_oficio": office_number,
+            "folio_control": control_folio or None,
+            "destinatario": (_control_text(row.get(normalized.get("DIRIGIDO A"))) or None) if normalized.get("DIRIGIDO A") else None,
+            "cargo": (_control_text(row.get(normalized.get("CARGO"))) or None) if normalized.get("CARGO") else None,
+            "dependencia": (_control_text(row.get(normalized.get("DEPENDENCIA"))) or None) if normalized.get("DEPENDENCIA") else None,
+            "asunto": (_control_text(row.get(normalized.get("ASUNTO"))) or None) if normalized.get("ASUNTO") else None,
+            "fecha_control": _control_date(row.get(normalized.get("FECHA"))) if normalized.get("FECHA") else None,
+            "firma": (_control_text(row.get(normalized.get("FIRMA"))) or None) if normalized.get("FIRMA") else None,
+            "solicitado_por": (_control_text(row.get(normalized.get("SOLICITADO POR"))) or None) if normalized.get("SOLICITADO POR") else None,
+            "status_control": (_control_text(row.get(normalized.get("STATUS"))) or None) if normalized.get("STATUS") else None,
+            "archivo_fisico": _control_bool(row.get(normalized.get("A. FISICO"))) if normalized.get("A. FISICO") else None,
+            "archivo_digital": _control_bool(row.get(normalized.get("A.DIGITAL"))) if normalized.get("A.DIGITAL") else None,
+            "origen": "control_excel",
+            "hoja_origen": "ENVIADOS DG",
+            "fila_origen": excel_row,
+            "clave_control": f"ENVIADOS DG|{year}|{key_suffix}|{office_number}".upper(),
+        })
+    return records, warnings
+
+
+def _ingest_dg_control(client, uploaded) -> tuple[dict, list[str]]:
+    raw = uploaded.getvalue()
+    author_name = st.session_state.user.get("nombre") or st.session_state.user.get("email")
+    ingestion = client.table("ingestas_oficios_dg").insert({
+        "nombre_archivo": uploaded.name,
+        "hash_archivo": hashlib.sha256(raw).hexdigest(),
+        "hoja": "ENVIADOS DG",
+        "estado": "Procesando",
+        "ingestado_por": st.session_state.user["id"],
+        "autor_nombre": author_name,
+    }).execute().data[0]
+    ingestion_id = str(ingestion["id"])
+    try:
+        records, warnings = _parse_dg_control_excel(io.BytesIO(raw))
+        existing_rows = (client.table("oficios_direccion_general").select("clave_control").execute().data or [])
+        existing_keys = {row.get("clave_control") for row in existing_rows if row.get("clave_control")}
+        new_count = sum(1 for row in records if row["clave_control"] not in existing_keys)
+        updated_count = len(records) - new_count
+        payload = [{**record, "ingesta_id": ingestion_id, "registrado_por": st.session_state.user["id"], "registrado_por_nombre": author_name} for record in records]
+        for offset in range(0, len(payload), 100):
+            client.table("oficios_direccion_general").upsert(payload[offset:offset + 100], on_conflict="clave_control").execute()
+        summary = {
+            "registros_detectados": len(records), "registros_nuevos": new_count,
+            "registros_actualizados": updated_count, "registros_omitidos": len(warnings),
+            "estado": "Completada", "completed_at": datetime.now().isoformat(),
+        }
+        client.table("ingestas_oficios_dg").update(summary).eq("id", ingestion_id).execute()
+        return {**ingestion, **summary}, warnings
+    except Exception as exc:
+        client.table("ingestas_oficios_dg").update({"estado": "Error", "detalle_error": str(exc), "completed_at": datetime.now().isoformat()}).eq("id", ingestion_id).execute()
+        raise
+
+
+def _latest_dg_ingestion(client):
+    try:
+        rows = client.table("ingestas_oficios_dg").select("*").order("created_at", desc=True).limit(1).execute().data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
 def _delete_official_letter(client, document: dict) -> None:
     if document.get("ruta_storage"):
         _remove_storage_paths(client, [document["ruta_storage"]])
     client.table("oficios_direccion_general").delete().eq("id", document["id"]).execute()
 
 
+def _attach_signed_office(client, document: dict, uploaded) -> None:
+    old_path = document.get("ruta_storage")
+    path = f"oficios_direccion_general/{document['anio']}/{int(document['mes']):02d}/{uuid.uuid4().hex}_{safe_name(uploaded.name)}"
+    _upload_junta_document(client, path, uploaded)
+    client.table("oficios_direccion_general").update({
+        "nombre_archivo": uploaded.name, "ruta_storage": path, "mime_type": uploaded.type,
+        "tamano_bytes": uploaded.size, "subido_por": st.session_state.user["id"],
+        "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"),
+        "updated_at": datetime.now().isoformat(),
+    }).eq("id", document["id"]).execute()
+    if old_path and old_path != path:
+        _remove_storage_paths(client, [old_path])
+
+
 def _official_letter_card(client, document: dict):
-    filename = document.get("nombre_archivo") or "oficio"
+    filename = document.get("nombre_archivo") or ""
     office_number = document.get("numero_oficio") or "Sin número"
-    subject = document.get("asunto") or Path(filename).stem
-    date_label = str(document.get("fecha_oficio") or "")[:10] or "Sin fecha"
+    subject = document.get("asunto") or "Sin asunto en control"
+    month_name = dict(MONTHS_ES).get(int(document.get("mes") or 0), "")
+    date_label = str(document.get("fecha_oficio") or "")[:10] or f"{month_name} {document.get('anio') or ''}".strip()
     recipient = document.get("destinatario") or "Sin destinatario"
-
+    has_file = bool(document.get("ruta_storage"))
     with st.container(border=True):
-        info, actions = st.columns([4.5, 2.2], vertical_alignment="center")
+        info, actions = st.columns([4.6, 2.1], vertical_alignment="center")
         info.markdown(f"**{html.escape(office_number)} · {html.escape(subject)}**")
-        info.caption(
-            f"{date_label} · Destinatario: {html.escape(recipient)}  \n"
-            f"Archivo: {html.escape(filename)} · Cargado por {html.escape(document.get('autor_nombre') or 'Usuario')}"
-        )
-        try:
-            data = client.storage.from_("expedientes").download(document["ruta_storage"])
-            action_cols = actions.columns(3 if is_master_admin() else 2)
-            show = action_cols[0].toggle("Ver", key=f"official_view_{document['id']}")
-            action_cols[1].download_button(
-                "Descargar", data, file_name=filename,
-                mime=document.get("mime_type") or "application/octet-stream",
-                key=f"official_download_{document['id']}", use_container_width=True,
-            )
-
-            if is_master_admin():
-                pending_key = f"official_delete_pending_{document['id']}"
-                if action_cols[2].button("Eliminar", key=f"official_delete_{document['id']}", use_container_width=True):
-                    st.session_state[pending_key] = True
-                    st.rerun()
-                if st.session_state.get(pending_key):
-                    st.warning(f"¿Eliminar definitivamente el oficio {office_number}?")
-                    yes_col, no_col, _ = st.columns([1, 1, 4])
-                    if yes_col.button("Sí, eliminar", key=f"official_confirm_delete_{document['id']}", type="primary"):
-                        _delete_official_letter(client, document)
-                        st.session_state.pop(pending_key, None)
-                        st.success("Oficio eliminado.")
-                        st.rerun()
-                    if no_col.button("Cancelar", key=f"official_cancel_delete_{document['id']}"):
-                        st.session_state.pop(pending_key, None)
-                        st.rerun()
-
-            if show:
-                st.markdown("##### Vista previa")
-                if not _document_preview(data, filename, 650):
+        info.caption(f"{html.escape(date_label)} · Destinatario: {html.escape(recipient)}  \n{html.escape(document.get('cargo') or 'Cargo no registrado')} · {html.escape(document.get('dependencia') or 'Dependencia no registrada')}")
+        status = document.get("status_control") or "Sin estatus"
+        source = "Control ENVIADOS DG" if document.get("origen") == "control_excel" else "Registro manual"
+        info.caption(f"{source} · Estatus: {html.escape(status)} · Solicitado por: {html.escape(document.get('solicitado_por') or 'Sin dato')}")
+        if has_file:
+            try:
+                data = client.storage.from_("expedientes").download(document["ruta_storage"])
+                action_cols = actions.columns(3 if is_master_admin() else 2)
+                show = action_cols[0].toggle("Ver", key=f"official_view_{document['id']}")
+                action_cols[1].download_button("Descargar", data, file_name=filename or "oficio_firmado", mime=document.get("mime_type") or "application/octet-stream", key=f"official_download_{document['id']}", use_container_width=True)
+                if is_master_admin() and action_cols[2].button("Eliminar", key=f"official_delete_{document['id']}", use_container_width=True):
+                    _delete_official_letter(client, document); st.rerun()
+                if show and not _document_preview(data, filename, 650):
                     st.info("La vista previa no está disponible para este formato.")
-        except Exception:
-            actions.caption("No fue posible recuperar el archivo.")
+            except Exception:
+                actions.caption("El archivo está registrado, pero no fue posible recuperarlo.")
+        else:
+            actions.warning("Firmado pendiente")
+        with st.expander("Expediente y carga del oficio firmado", expanded=not has_file):
+            c1, c2, c3 = st.columns(3)
+            c1.write(f"**Folio control:** {document.get('folio_control') or '—'}")
+            c2.write(f"**Firma:** {document.get('firma') or '—'}")
+            physical, digital = document.get("archivo_fisico"), document.get("archivo_digital")
+            c3.write(f"**Control:** Físico {'Sí' if physical is True else 'No' if physical is False else '—'} · Digital {'Sí' if digital is True else 'No' if digital is False else '—'}")
+            if document.get("fecha_control"):
+                st.caption(f"Fecha capturada en Excel: {str(document.get('fecha_control'))[:10]} (dato auxiliar; el mes/año se obtiene del número de oficio).")
+            signed = st.file_uploader("Adjuntar oficio firmado" if not has_file else "Reemplazar oficio firmado", type=["pdf", "docx", "jpg", "jpeg", "png"], key=f"official_signed_upload_{document['id']}")
+            if st.button("Guardar oficio firmado", key=f"official_signed_save_{document['id']}", type="primary", use_container_width=True, disabled=not signed):
+                try:
+                    _attach_signed_office(client, document, signed)
+                    st.success("Oficio firmado incorporado al expediente."); st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible guardar el oficio firmado: {exc}")
 
 
 def official_letters_month(year: int, month: int, month_name: str):
     top1, top2 = st.columns([1, 5])
     if top1.button("← Meses", use_container_width=True, key=f"official_back_months_{year}_{month}"):
-        st.session_state.pop("official_month", None)
-        st.rerun()
+        st.session_state.pop("official_month", None); st.rerun()
     top2.markdown(f"## Oficios Dirección General · {month_name} {year}")
-
     if not configured():
-        st.error("Primero debes conectar Supabase.")
-        return
-
+        st.error("Primero debes conectar Supabase."); return
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-
-    st.markdown("### Cargar oficio firmado")
-    st.caption("Registra los datos principales y adjunta el documento firmado. El archivo quedará dentro del expediente del mes.")
-    with st.form(f"new_official_letter_{year}_{month}", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        office_number = c1.text_input("Número de oficio", placeholder="Ej. DG/123/2026")
-        office_date = c2.date_input("Fecha del oficio", value=date(year, month, 1))
-        subject = st.text_input("Asunto *")
-        recipient = st.text_input("Destinatario")
-        notes = st.text_area("Notas / descripción", height=85)
-        uploaded = st.file_uploader(
-            "Oficio firmado *",
-            type=["pdf", "docx", "jpg", "jpeg", "png"],
-            key=f"official_upload_{year}_{month}",
-        )
-        save_office = st.form_submit_button("Guardar oficio", type="primary", use_container_width=True)
-
-    if save_office:
-        if not subject.strip():
-            st.error("Escribe el asunto del oficio.")
-        elif not uploaded:
-            st.error("Adjunta el oficio firmado.")
-        elif office_date.year != year or office_date.month != month:
-            st.error(f"La fecha del oficio debe corresponder a {month_name} de {year}.")
-        else:
-            try:
-                path = f"oficios_direccion_general/{year}/{month:02d}/{uuid.uuid4().hex}_{safe_name(uploaded.name)}"
-                _upload_junta_document(client, path, uploaded)
-                client.table("oficios_direccion_general").insert({
-                    "anio": year,
-                    "mes": month,
-                    "numero_oficio": office_number.strip() or None,
-                    "fecha_oficio": office_date.isoformat(),
-                    "asunto": subject.strip(),
-                    "destinatario": recipient.strip() or None,
-                    "notas": notes.strip() or None,
-                    "nombre_archivo": uploaded.name,
-                    "ruta_storage": path,
-                    "mime_type": uploaded.type,
-                    "tamano_bytes": uploaded.size,
-                    "subido_por": st.session_state.user["id"],
-                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"),
-                }).execute()
-                st.success("Oficio guardado correctamente.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"No fue posible guardar el oficio: {exc}")
-
-    rows = (client.table("oficios_direccion_general").select("*")
-            .eq("anio", year).eq("mes", month)
-            .order("fecha_oficio", desc=True).order("created_at", desc=True)
-            .execute().data or [])
-
-    st.markdown(f"### Oficios firmados · {len(rows)}")
-    if not rows:
-        st.info(f"Todavía no hay oficios registrados en {month_name} de {year}.")
-        return
-
-    term = st.text_input(
-        "Buscar dentro del mes",
-        placeholder="Número, asunto, destinatario…",
-        key=f"official_search_{year}_{month}",
-    ).strip().lower()
-
+    rows = client.table("oficios_direccion_general").select("*").eq("anio", year).eq("mes", month).order("fila_origen").order("created_at").execute().data or []
+    signed_count = sum(bool(row.get("ruta_storage")) for row in rows)
+    metrics_html = (
+        '<div class="metric-grid">'
+        f'<div class="metric-box metric-blue"><div class="metric-label">Oficios registrados</div><div class="metric-value">{len(rows)}</div></div>'
+        f'<div class="metric-box metric-green"><div class="metric-label">Con firmado cargado</div><div class="metric-value">{signed_count}</div></div>'
+        f'<div class="metric-box metric-orange"><div class="metric-label">Pendientes de firmado</div><div class="metric-value">{max(0, len(rows)-signed_count)}</div></div>'
+        f'<div class="metric-box metric-purple"><div class="metric-label">Mes</div><div class="metric-value">{month_name}</div></div>'
+        '</div>'
+    )
+    st.markdown(metrics_html, unsafe_allow_html=True)
+    term = st.text_input("Buscar dentro del mes", placeholder="Número, asunto, destinatario, dependencia, solicitante…", key=f"official_search_{year}_{month}").strip().lower()
     filtered = rows
     if term:
-        filtered = [
-            row for row in rows
-            if term in " ".join([
-                str(row.get("numero_oficio") or ""),
-                str(row.get("asunto") or ""),
-                str(row.get("destinatario") or ""),
-                str(row.get("notas") or ""),
-            ]).lower()
-        ]
-
-    st.caption(f"{len(filtered)} resultado(s)" if term else f"{len(rows)} oficio(s) en el expediente mensual.")
+        filtered = [row for row in rows if term in " ".join([str(row.get("numero_oficio") or ""), str(row.get("folio_control") or ""), str(row.get("asunto") or ""), str(row.get("destinatario") or ""), str(row.get("cargo") or ""), str(row.get("dependencia") or ""), str(row.get("solicitado_por") or ""), str(row.get("status_control") or "")]).lower()]
+    st.markdown(f"### Oficios del mes · {len(filtered)}")
+    if not filtered:
+        st.info(f"No hay registros que mostrar en {month_name} de {year}.")
     for row in filtered:
         _official_letter_card(client, row)
 
@@ -2537,89 +2628,75 @@ def official_letters_month(year: int, month: int, month_name: str):
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
     if top1.button("← Años", use_container_width=True, key=f"official_back_years_{year}"):
-        st.session_state.pop("official_year", None)
-        st.session_state.pop("official_month", None)
-        st.rerun()
+        st.session_state.pop("official_year", None); st.session_state.pop("official_month", None); st.rerun()
     top2.markdown(f"## Oficios Dirección General · {year}")
     st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
-
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
-    counts = {month: 0 for month, _ in MONTHS_ES}
-
+    counts = {month: {"total": 0, "signed": 0} for month, _ in MONTHS_ES}
     if client:
         try:
-            rows = client.table("oficios_direccion_general").select("mes").eq("anio", year).execute().data or []
+            rows = client.table("oficios_direccion_general").select("mes,ruta_storage").eq("anio", year).execute().data or []
             for row in rows:
                 month_value = int(row.get("mes") or 0)
                 if month_value in counts:
-                    counts[month_value] += 1
+                    counts[month_value]["total"] += 1
+                    counts[month_value]["signed"] += int(bool(row.get("ruta_storage")))
         except Exception:
             pass
-
     colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
-
     for start in range(0, 12, 3):
         columns = st.columns(3, gap="large")
-        batch = MONTHS_ES[start:start + 3]
-        for offset, (month, month_name) in enumerate(batch):
+        for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
             color = colors[(start + offset) % len(colors)]
+            count = counts.get(month, {"total": 0, "signed": 0})
             with columns[offset]:
-                st.markdown(
-                    f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{counts.get(month, 0)} oficio(s) firmado(s)</p></div>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    f"Abrir {month_name}",
-                    key=f"official_month_{year}_{month}",
-                    use_container_width=True,
-                    type="primary",
-                ):
-                    st.session_state.official_month = month
-                    st.rerun()
+                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{count["total"]} oficio(s) · {count["signed"]} firmado(s)</p></div>', unsafe_allow_html=True)
+                if st.button(f"Abrir {month_name}", key=f"official_month_{year}_{month}", use_container_width=True, type="primary"):
+                    st.session_state.official_month = month; st.rerun()
 
 
 def official_letters():
     if not user_can(MODULE_OFFICIAL_LETTERS):
-        st.error("No tienes permisos para acceder a Oficios Dirección General.")
-        return
-
+        st.error("No tienes permisos para acceder a Oficios Dirección General."); return
     selected_year = st.session_state.get("official_year")
     selected_month = st.session_state.get("official_month")
-
     if selected_year and selected_month:
-        month_name = dict(MONTHS_ES).get(int(selected_month), str(selected_month))
-        official_letters_month(int(selected_year), int(selected_month), month_name)
-        return
-
+        official_letters_month(int(selected_year), int(selected_month), dict(MONTHS_ES).get(int(selected_month), str(selected_month))); return
     if selected_year:
-        official_letters_year(int(selected_year))
-        return
-
+        official_letters_year(int(selected_year)); return
     st.markdown('<h1 class="choice-title">Oficios Dirección General</h1>', unsafe_allow_html=True)
-    st.markdown(
-        '<p class="choice-subtitle">Archivo institucional de oficios firmados · selecciona el año</p>',
-        unsafe_allow_html=True,
-    )
-
+    st.markdown('<p class="choice-subtitle">Archivo institucional de oficios firmados · selecciona el año</p>', unsafe_allow_html=True)
+    if configured():
+        client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+        with st.container(border=True):
+            st.markdown("### Ingestar archivo de control")
+            st.caption("Por ahora se leerá exclusivamente la hoja ENVIADOS DG. Se crea un registro por cada oficio y el mes/año se obtiene del número de oficio.")
+            control_file = st.file_uploader("Archivo de control (.xlsx)", type=["xlsx"], key="official_control_ingestion")
+            if st.button("Ingestar ENVIADOS DG", type="primary", use_container_width=True, disabled=control_file is None, key="official_control_ingest_button"):
+                try:
+                    with st.spinner("Leyendo ENVIADOS DG y poblando la base de datos…"):
+                        result, warnings = _ingest_dg_control(client, control_file)
+                    st.success(f"Ingesta completada: {result.get('registros_detectados', 0)} oficio(s). Nuevos: {result.get('registros_nuevos', 0)} · actualizados: {result.get('registros_actualizados', 0)}.")
+                    if warnings:
+                        st.warning(f"Se omitieron {len(warnings)} fila(s) porque no se pudo obtener mes/año del número de oficio.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible ingestar el archivo: {exc}")
+            latest = _latest_dg_ingestion(client)
+            if latest:
+                when = str(latest.get("completed_at") or latest.get("created_at") or "")[:16].replace("T", " · ")
+                st.info(f"Última ingesta: **{latest.get('nombre_archivo') or 'Archivo'}** · {latest.get('registros_detectados') or 0} registro(s) · por **{latest.get('autor_nombre') or 'Usuario'}** · {when} · {latest.get('estado') or ''}")
+    else:
+        st.info("La ingesta del archivo de control estará disponible al conectar Supabase.")
     colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)", "var(--blue)"]
     for start in (0, 3, 6):
         batch = OFFICIAL_LETTER_YEARS[start:start + 3]
         columns = st.columns(len(batch), gap="large")
         for column, year, color in zip(columns, batch, colors[start:start + len(batch)]):
             with column:
-                st.markdown(
-                    f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p>Oficios firmados</p></div>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    f"Abrir {year}",
-                    key=f"official_year_{year}",
-                    use_container_width=True,
-                    type="primary",
-                ):
-                    st.session_state.official_year = year
-                    st.session_state.pop("official_month", None)
-                    st.rerun()
+                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p>Oficios</p></div>', unsafe_allow_html=True)
+                if st.button(f"Abrir {year}", key=f"official_year_{year}", use_container_width=True, type="primary"):
+                    st.session_state.official_year = year; st.session_state.pop("official_month", None); st.rerun()
 
 def board_government():
     if not user_can(MODULE_BOARD):
