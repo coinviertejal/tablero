@@ -6,6 +6,7 @@ import html
 import io
 from pathlib import Path
 import re
+import requests
 import subprocess
 import tempfile
 import uuid
@@ -30,7 +31,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from data import MUNICIPIOS_JALISCO
-from db import access_profile, client_with_token, configured, download_project_images, public_client, register_access, upload_files, valid_official_email
+from db import access_profile, client_with_token, configured, download_project_images, public_client, public_key, register_access, safe_name, upload_files, valid_official_email
 from exports import build_docx, build_pdf
 
 MODULE_PROJECTS = "Programas / Proyectos"
@@ -1086,6 +1087,43 @@ def _pdf_preview(data: bytes, height: int = 650):
         st.info("No fue posible generar la vista previa de este PDF. Puedes descargarlo para consultarlo.")
 
 
+def _upload_junta_document(client, path: str, uploaded) -> None:
+    """Usa carga reanudable por bloques para documentos mayores a 6 MB."""
+    data = uploaded.getvalue()
+    mime_type = uploaded.type or "application/octet-stream"
+    if len(data) <= 6 * 1024 * 1024:
+        client.storage.from_("expedientes").upload(path, data, {"content-type": mime_type})
+        return
+    endpoint = f"{st.secrets['SUPABASE_URL'].rstrip('/')}/storage/v1/upload/resumable"
+    encode_meta = lambda value: base64.b64encode(str(value).encode("utf-8")).decode("ascii")
+    headers = {
+        "Authorization": f"Bearer {st.session_state.access_token}", "apikey": public_key(),
+        "tus-resumable": "1.0.0", "upload-length": str(len(data)), "x-upsert": "false",
+        "upload-metadata": ",".join([
+            f"bucketName {encode_meta('expedientes')}", f"objectName {encode_meta(path)}",
+            f"contentType {encode_meta(mime_type)}", f"cacheControl {encode_meta('3600')}",
+        ]),
+    }
+    response = requests.post(endpoint, headers=headers, timeout=30)
+    response.raise_for_status()
+    upload_url = response.headers.get("Location") or response.headers.get("location")
+    if not upload_url:
+        raise RuntimeError("No se recibió la ubicación de la carga.")
+    if upload_url.startswith("/"):
+        upload_url = f"{st.secrets['SUPABASE_URL'].rstrip('/')}{upload_url}"
+    offset, chunk_size = 0, 6 * 1024 * 1024
+    while offset < len(data):
+        chunk = data[offset:offset + chunk_size]
+        chunk_headers = {
+            "Authorization": f"Bearer {st.session_state.access_token}", "apikey": public_key(),
+            "tus-resumable": "1.0.0", "upload-offset": str(offset),
+            "content-type": "application/offset+octet-stream",
+        }
+        result = requests.patch(upload_url, headers=chunk_headers, data=chunk, timeout=120)
+        result.raise_for_status()
+        offset = int(result.headers.get("Upload-Offset") or result.headers.get("upload-offset") or offset + len(chunk))
+
+
 def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
     suffix = Path(filename).suffix.lower()
     if suffix == ".pdf":
@@ -1254,31 +1292,41 @@ def board_session_detail(session: dict):
             if not _document_preview(session_ppt.getvalue(), session_ppt.name, 520):
                 st.info("No fue posible convertir esta presentación para previsualizarla.")
     if uploaded and media1.button("Guardar convocatoria", key=f"save_notice_{session['id']}", use_container_width=True):
-        path = f"junta/{session['id']}/documentos/{uuid.uuid4().hex}_{Path(uploaded.name).name}"
-        client.storage.from_("expedientes").upload(path, uploaded.getvalue(), {"content-type": uploaded.type or "application/octet-stream"})
-        client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Convocatoria / orden del día",
-            "nombre_visible": Path(uploaded.name).stem, "nombre_archivo": uploaded.name, "ruta_storage": path,
-            "mime_type": uploaded.type, "tamano_bytes": uploaded.size, "subido_por": st.session_state.user["id"],
-            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
-        st.success("Convocatoria guardada."); st.rerun()
+        path = f"junta/{session['id']}/documentos/{uuid.uuid4().hex}_{safe_name(uploaded.name)}"
+        try:
+            _upload_junta_document(client, path, uploaded)
+            client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Convocatoria / orden del día",
+                "nombre_visible": Path(uploaded.name).stem, "nombre_archivo": uploaded.name, "ruta_storage": path,
+                "mime_type": uploaded.type, "tamano_bytes": uploaded.size, "subido_por": st.session_state.user["id"],
+                "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
+            st.success("Convocatoria guardada."); st.rerun()
+        except Exception:
+            st.error("No fue posible guardar la convocatoria. Puedes volver a intentarlo sin salir de la sesión.")
     if session_ppt and media_ppt.button("Guardar presentación", key=f"save_presentation_{session['id']}", use_container_width=True):
-        path = f"junta/{session['id']}/presentacion/{uuid.uuid4().hex}_{Path(session_ppt.name).name}"
-        client.storage.from_("expedientes").upload(path, session_ppt.getvalue(), {"content-type": session_ppt.type or "application/vnd.openxmlformats-officedocument.presentationml.presentation"})
-        client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Presentación de la sesión",
-            "nombre_visible": Path(session_ppt.name).stem, "nombre_archivo": session_ppt.name, "ruta_storage": path,
-            "mime_type": session_ppt.type, "tamano_bytes": session_ppt.size, "subido_por": st.session_state.user["id"],
-            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
-        st.success("Presentación guardada."); st.rerun()
+        path = f"junta/{session['id']}/presentacion/{uuid.uuid4().hex}_{safe_name(session_ppt.name)}"
+        try:
+            with st.spinner("Guardando presentación por bloques…"):
+                _upload_junta_document(client, path, session_ppt)
+                client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Presentación de la sesión",
+                    "nombre_visible": Path(session_ppt.name).stem, "nombre_archivo": session_ppt.name, "ruta_storage": path,
+                    "mime_type": session_ppt.type, "tamano_bytes": session_ppt.size, "subido_por": st.session_state.user["id"],
+                    "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
+            st.success("Presentación guardada."); st.rerun()
+        except Exception:
+            st.error("No fue posible guardar la presentación. Puedes volver a intentarlo sin salir de la sesión.")
     if signed_minutes and media2.button("Guardar acta firmada", key=f"save_minutes_{session['id']}", use_container_width=True):
-        path = f"junta/{session['id']}/acta_firmada/{uuid.uuid4().hex}_{Path(signed_minutes.name).name}"
-        client.storage.from_("expedientes").upload(path, signed_minutes.getvalue(), {"content-type": signed_minutes.type or "application/pdf"})
-        client.table("sesiones_junta").update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path}).eq("id", session["id"]).execute()
-        client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Acta firmada",
-            "nombre_visible": Path(signed_minutes.name).stem, "nombre_archivo": signed_minutes.name, "ruta_storage": path,
-            "mime_type": signed_minutes.type, "tamano_bytes": signed_minutes.size, "subido_por": st.session_state.user["id"],
-            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
-        st.session_state.board_session.update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path})
-        st.success("Acta firmada guardada.")
+        path = f"junta/{session['id']}/acta_firmada/{uuid.uuid4().hex}_{safe_name(signed_minutes.name)}"
+        try:
+            _upload_junta_document(client, path, signed_minutes)
+            client.table("sesiones_junta").update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path}).eq("id", session["id"]).execute()
+            client.table("documentos_sesion_junta").insert({"sesion_id": session["id"], "tipo_documento": "Acta firmada",
+                "nombre_visible": Path(signed_minutes.name).stem, "nombre_archivo": signed_minutes.name, "ruta_storage": path,
+                "mime_type": signed_minutes.type, "tamano_bytes": signed_minutes.size, "subido_por": st.session_state.user["id"],
+                "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email")}).execute()
+            st.session_state.board_session.update({"acta_firmada_nombre": signed_minutes.name, "acta_firmada_ruta": path})
+            st.success("Acta firmada guardada.")
+        except Exception:
+            st.error("No fue posible guardar el acta. Puedes volver a intentarlo sin salir de la sesión.")
     if session.get("acta_firmada_ruta"):
         try:
             minutes_data = client.storage.from_("expedientes").download(session["acta_firmada_ruta"])
