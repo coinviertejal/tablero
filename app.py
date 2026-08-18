@@ -2453,6 +2453,7 @@ def _parse_dg_control_excel(uploaded) -> tuple[list[dict], list[str]]:
     if "OFICIO" not in normalized:
         raise ValueError("La hoja ENVIADOS DG no contiene la columna OFICIO esperada.")
     records, warnings = [], []
+    seen_control_keys = {}
     for index, row in frame.iterrows():
         excel_row = int(index) + 3
         office_number = _control_text(row.get(normalized["OFICIO"]))
@@ -2465,6 +2466,15 @@ def _parse_dg_control_excel(uploaded) -> tuple[list[dict], list[str]]:
         month, year = period
         control_folio = _control_text(row.get(normalized.get("NO"))) if normalized.get("NO") else ""
         key_suffix = control_folio or str(excel_row)
+        base_control_key = f"ENVIADOS DG|{year}|{key_suffix}|{office_number}".upper()
+        duplicate_number = seen_control_keys.get(base_control_key, 0) + 1
+        seen_control_keys[base_control_key] = duplicate_number
+        control_key = base_control_key if duplicate_number == 1 else f"{base_control_key}|DUP{duplicate_number}"
+        if duplicate_number > 1:
+            warnings.append(
+                f"Fila {excel_row}: el oficio {office_number} comparte número/control con otro registro; "
+                f"se conservará como registro independiente (duplicado {duplicate_number})."
+            )
         records.append({
             "anio": year,
             "mes": month,
@@ -2483,7 +2493,7 @@ def _parse_dg_control_excel(uploaded) -> tuple[list[dict], list[str]]:
             "origen": "control_excel",
             "hoja_origen": "ENVIADOS DG",
             "fila_origen": excel_row,
-            "clave_control": f"ENVIADOS DG|{year}|{key_suffix}|{office_number}".upper(),
+            "clave_control": control_key,
         })
     return records, warnings
 
