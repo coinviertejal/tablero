@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import requests
 import subprocess
+import shutil
 import tempfile
 import uuid
 
@@ -1124,6 +1125,38 @@ def _upload_junta_document(client, path: str, uploaded) -> None:
         offset = int(result.headers.get("Upload-Offset") or result.headers.get("upload-offset") or offset + len(chunk))
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _office_to_pdf(data: bytes, filename: str) -> tuple[bytes | None, str]:
+    """Convierte Office a PDF con un perfil aislado y devuelve diagnóstico."""
+    executable = shutil.which("libreoffice") or shutil.which("soffice")
+    if not executable:
+        return None, "LibreOffice Impress no está instalado en el servidor."
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            source = work / (safe_name(Path(filename).stem) + Path(filename).suffix.lower())
+            output_dir = work / "output"
+            profile_dir = work / "profile"
+            output_dir.mkdir()
+            profile_dir.mkdir()
+            source.write_bytes(data)
+            command = [
+                executable, f"-env:UserInstallation={profile_dir.as_uri()}",
+                "--headless", "--nologo", "--nodefault", "--nofirststartwizard",
+                "--convert-to", "pdf:impress_pdf_Export", "--outdir", str(output_dir), str(source),
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+            converted = output_dir / f"{source.stem}.pdf"
+            if result.returncode != 0 or not converted.exists():
+                detail = (result.stderr or result.stdout or "La conversión no produjo un PDF.").strip()
+                return None, detail[-500:]
+            return converted.read_bytes(), ""
+    except subprocess.TimeoutExpired:
+        return None, "La conversión excedió cinco minutos."
+    except Exception as exc:
+        return None, str(exc)
+
+
 def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
     suffix = Path(filename).suffix.lower()
     if suffix == ".pdf":
@@ -1131,51 +1164,13 @@ def _document_preview(data: bytes, filename: str, height: int = 650) -> bool:
         return True
     if suffix not in (".docx", ".pptx"):
         return False
-    try:
-        with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder) / Path(filename).name
-            source.write_bytes(data)
-            result = subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", folder, str(source)],
-                                    capture_output=True, timeout=90, check=False)
-            converted = source.with_suffix(".pdf")
-            if result.returncode != 0 or not converted.exists():
-                return False
-            _pdf_preview(converted.read_bytes(), height)
-            return True
-    except Exception:
-        pass
-    # Respaldo estable para Streamlit Cloud: python-pptx permite consultar el
-    # contenido aunque LibreOffice no esté disponible o rechace la conversión.
+    converted, diagnostic = _office_to_pdf(data, filename)
+    if converted:
+        _pdf_preview(converted, height)
+        return True
     if suffix == ".pptx":
-        try:
-            presentation = Presentation(io.BytesIO(data))
-            if not presentation.slides:
-                st.info("La presentación no contiene diapositivas.")
-                return True
-            st.caption(f"Vista de contenido · {len(presentation.slides)} diapositiva(s)")
-            for slide_number, slide in enumerate(presentation.slides, start=1):
-                title = ""
-                blocks = []
-                for shape in slide.shapes:
-                    if not hasattr(shape, "text"):
-                        continue
-                    value = str(shape.text or "").strip()
-                    if not value:
-                        continue
-                    if getattr(slide.shapes, "title", None) is shape:
-                        title = value
-                    elif value not in blocks:
-                        blocks.append(value)
-                with st.container(border=True):
-                    st.markdown(f"##### {slide_number}. {html.escape(title or 'Diapositiva sin título')}")
-                    if blocks:
-                        for block in blocks:
-                            st.markdown(html.escape(block).replace("\n", "  \n"))
-                    else:
-                        st.caption("Esta diapositiva contiene principalmente elementos gráficos o imágenes.")
-            return True
-        except Exception:
-            return False
+        st.warning("No fue posible generar las imágenes de las diapositivas.")
+        st.caption(f"Diagnóstico: {diagnostic}")
     return False
 
 
@@ -1313,7 +1308,7 @@ def board_session_detail(session: dict):
         st.session_state.pop("board_session", None)
         st.rerun()
     st.markdown(f"## {session.get('nombre')}")
-    st.caption("Versión Junta Visor PPT V11 · vista y descarga persistentes")
+    st.caption("Versión Junta Visor PPT V12 · láminas con diseño completo")
     st.caption(f"{session.get('tipo')} · Junta de Gobierno · {year_label}")
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
     session_documents = (client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"])
