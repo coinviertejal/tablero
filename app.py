@@ -8,12 +8,6 @@ import io
 from pathlib import Path
 import re
 import requests
-try:
-    from google.oauth2 import service_account
-    from google.auth.transport.requests import AuthorizedSession
-except ImportError:
-    service_account = None
-    AuthorizedSession = None
 import subprocess
 import shutil
 import tempfile
@@ -50,8 +44,6 @@ ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES, MODULE_OFFICIAL
 USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
 MASTER_ADMIN_EMAIL = "yani.limberopulos@jalisco.gob.mx"
-GOOGLE_DRIVE_DG_FOLDER_ID = "1WEoVBXDN_YeDCSjfYCXjTTMhhbJm6bGR"
-GOOGLE_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def user_can(module: str) -> bool:
@@ -2387,311 +2379,181 @@ def committees():
                     st.error(f"No fue posible crear la sesión: {exc}")
 
 
-def _drive_configured() -> bool:
-    return (
-        service_account is not None
-        and AuthorizedSession is not None
-        and "google_service_account" in st.secrets
-    )
-
-
-@st.cache_resource(show_spinner=False)
-def _drive_session():
-    if not _drive_configured():
-        raise RuntimeError(
-            "Google Drive no está configurado. Agrega [google_service_account] a los Secrets "
-            "y google-auth a requirements.txt."
-        )
-    info = dict(st.secrets["google_service_account"])
-    credentials = service_account.Credentials.from_service_account_info(
-        info,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
-    )
-    return AuthorizedSession(credentials)
-
-
-def _drive_list_children(session, folder_id: str) -> list[dict]:
-    files, page_token = [], None
-    while True:
-        params = {
-            "q": f"'{folder_id}' in parents and trashed = false",
-            "pageSize": 1000,
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-            "fields": "nextPageToken,files(id,name,mimeType,size,webViewLink,modifiedTime,createdTime)",
-        }
-        if page_token:
-            params["pageToken"] = page_token
-        response = session.get("https://www.googleapis.com/drive/v3/files", params=params, timeout=60)
-        response.raise_for_status()
-        payload = response.json()
-        files.extend(payload.get("files") or [])
-        page_token = payload.get("nextPageToken")
-        if not page_token:
-            break
-    return files
-
-
-def _drive_list_files_recursive(session, folder_id: str) -> list[dict]:
-    """Recorre la carpeta DG y subcarpetas; devuelve archivos, no carpetas."""
-    pending = [folder_id]
-    result = []
-    visited = set()
-    while pending:
-        current = pending.pop()
-        if current in visited:
-            continue
-        visited.add(current)
-        for item in _drive_list_children(session, current):
-            if item.get("mimeType") == GOOGLE_DRIVE_FOLDER_MIME:
-                pending.append(item["id"])
-            else:
-                result.append(item)
-    return result
-
-
-def _drive_download_file(file_id: str) -> bytes:
-    session = _drive_session()
-    response = session.get(
-        f"https://www.googleapis.com/drive/v3/files/{file_id}",
-        params={"alt": "media", "supportsAllDrives": "true"},
-        timeout=120,
-    )
-    response.raise_for_status()
-    return response.content
-
-
-def _normalize_control_folio(value) -> str:
-    text_value = str(value or "").upper().strip()
-    text_value = re.sub(r"\.0$", "", text_value)
-    text_value = re.sub(r"\s+", "", text_value)
-    return text_value
-
-
-def _drive_filename_folio(filename: str) -> str | None:
-    """Lee el folio archivístico inicial: 90 ..., 180-BIS ..., etc."""
-    stem = Path(filename or "").stem.upper().strip()
-    match = re.match(r"^\s*(\d+(?:\s*-\s*BIS)?)\b", stem, re.I)
-    if not match:
-        return None
-    return re.sub(r"\s+", "", match.group(1).upper())
-
-
-def _office_number_signature(value: str) -> tuple[str | None, str | None, str | None]:
-    """Firma tolerante para cruzar variantes DG/E, DG-E, DGE, DGI y meses pegados."""
-    raw = Path(str(value or "")).stem.upper()
-    raw = raw.replace("O6", "06")  # typo observado en nombres de archivo.
+def _normalize_office_link_key(value) -> str:
+    """Normaliza números de oficio para cruzar vínculos de Drive de forma tolerante."""
+    raw = str(value or "").upper().strip()
+    raw = raw.replace("\\", "/")
     raw = re.sub(r"\s+", "", raw)
-    bis = "BIS" if "BIS" in raw else ""
+    raw = raw.replace("DGE", "DG/E").replace("DGI", "DG/I")
+    raw = raw.replace("DG-E", "DG/E").replace("DG-I", "DG/I")
+    raw = re.sub(r"/+", "/", raw)
+    raw = re.sub(r"-+", "-", raw)
+    return raw.strip("-/")
 
-    # Año: sólo acepta 2024–2030.
-    year_match = re.search(r"(202[4-9]|2030)", raw)
-    year = year_match.group(1) if year_match else None
 
-    # Mes cercano al año, ya sea 03-2026, 032026, /03/2026.
-    month = None
-    if year_match:
-        before = raw[:year_match.start()]
-        month_match = re.search(r"(\d{2})\D*$", before)
-        if month_match and 1 <= int(month_match.group(1)) <= 12:
-            month = f"{int(month_match.group(1)):02d}"
-
-    # Consecutivo del oficio: prioriza el número que sigue al prefijo DG/DGE/DGI.
-    seq = None
-    seq_match = re.search(
-        r"(?:DG(?:/E|/I|-E|-I|E|I)?)[-/]?(?:1-)?(\d{1,3})(?:-BIS)?",
-        raw,
-        re.I,
-    )
-    if seq_match:
-        seq = str(int(seq_match.group(1)))
+def _parse_drive_links_file(uploaded) -> tuple[list[dict], list[str]]:
+    """Acepta Excel o CSV con numero_oficio, nombre_archivo, url_drive."""
+    filename = (getattr(uploaded, "name", "") or "").lower()
+    if filename.endswith(".csv"):
+        frame = pd.read_csv(uploaded, dtype=object)
     else:
-        # Fallback: primer bloque numérico de 1–3 dígitos después de quitar un folio inicial.
-        stem = re.sub(r"^\d+(?:-BIS)?", "", raw)
-        nums = re.findall(r"(?<!\d)(\d{1,3})(?!\d)", stem)
-        if nums:
-            seq = str(int(nums[0]))
+        frame = pd.read_excel(uploaded, dtype=object)
 
-    if seq and bis:
-        seq = f"{seq}-BIS"
-    return seq, month, year
+    frame.columns = [str(c).strip().lower() for c in frame.columns]
+
+    aliases = {
+        "numero_oficio": ["numero_oficio", "número de oficio", "numero de oficio", "oficio"],
+        "nombre_archivo": ["nombre_archivo", "nombre archivo", "archivo", "nombre del archivo"],
+        "url_drive": ["url_drive", "url drive", "liga", "liga drive", "url", "enlace", "enlace drive"],
+    }
+
+    resolved = {}
+    for target, options in aliases.items():
+        for option in options:
+            if option in frame.columns:
+                resolved[target] = option
+                break
+
+    missing = [k for k in ("numero_oficio", "url_drive") if k not in resolved]
+    if missing:
+        raise ValueError(
+            "El archivo debe incluir al menos las columnas 'numero_oficio' y 'url_drive'. "
+            "La columna 'nombre_archivo' es opcional."
+        )
+
+    records, warnings = [], []
+    seen = set()
+
+    for idx, row in frame.iterrows():
+        office_number = str(row.get(resolved["numero_oficio"], "") or "").strip()
+        url = str(row.get(resolved["url_drive"], "") or "").strip()
+        file_name = ""
+        if "nombre_archivo" in resolved:
+            file_name = str(row.get(resolved["nombre_archivo"], "") or "").strip()
+
+        excel_row = idx + 2
+        if not office_number and not url:
+            continue
+        if not office_number:
+            warnings.append(f"Fila {excel_row}: falta numero_oficio.")
+            continue
+        if not url:
+            warnings.append(f"Fila {excel_row}: falta url_drive para {office_number}.")
+            continue
+        if "drive.google.com" not in url:
+            warnings.append(f"Fila {excel_row}: la URL no parece ser de Google Drive: {office_number}.")
+        key = _normalize_office_link_key(office_number)
+        if key in seen:
+            warnings.append(f"Fila {excel_row}: número de oficio repetido en el archivo: {office_number}.")
+        seen.add(key)
+
+        records.append({
+            "numero_oficio": office_number,
+            "numero_normalizado": key,
+            "nombre_archivo": file_name or None,
+            "url_drive": url,
+            "fila_origen": excel_row,
+        })
+
+    return records, warnings
 
 
-def _build_office_indexes(rows: list[dict]) -> tuple[dict, dict]:
-    by_folio, by_signature = {}, {}
-    for row in rows:
-        folio = _normalize_control_folio(row.get("folio_control"))
-        if folio:
-            by_folio.setdefault(folio, []).append(row)
+def _import_drive_links(client, uploaded) -> dict:
+    records, warnings = _parse_drive_links_file(uploaded)
 
-        seq, month, year = _office_number_signature(row.get("numero_oficio") or "")
-        if seq and month and year:
-            by_signature.setdefault((seq, month, year), []).append(row)
-    return by_folio, by_signature
+    offices = client.table("oficios_direccion_general").select(
+        "id,numero_oficio,folio_control,drive_url"
+    ).execute().data or []
 
+    index = {}
+    for row in offices:
+        key = _normalize_office_link_key(row.get("numero_oficio"))
+        if key:
+            index.setdefault(key, []).append(row)
 
-def _match_drive_file(file_meta: dict, by_folio: dict, by_signature: dict) -> tuple[str, dict | None, str]:
-    """Devuelve estado, registro oficio y criterio."""
-    name = file_meta.get("name") or ""
+    linked = ambiguous = unmatched = 0
+    now_iso = datetime.now().isoformat()
+    details = []
 
-    folio = _drive_filename_folio(name)
-    if folio:
-        candidates = by_folio.get(folio, [])
+    for record in records:
+        candidates = index.get(record["numero_normalizado"], [])
+
+        # Fallback por número consecutivo + mes + año si el formato difiere.
+        if not candidates:
+            m = re.search(r"(\d{1,3}(?:-BIS)?)\D+(\d{2})\D+(20\d{2})$", record["numero_normalizado"])
+            if m:
+                seq, month, year = m.groups()
+                seq_norm = seq.upper()
+                fallback = []
+                for row in offices:
+                    norm = _normalize_office_link_key(row.get("numero_oficio"))
+                    m2 = re.search(r"(\d{1,3}(?:-BIS)?)\D+(\d{2})\D+(20\d{2})$", norm)
+                    if m2 and m2.groups() == (seq_norm, month, year):
+                        fallback.append(row)
+                candidates = fallback
+
         if len(candidates) == 1:
-            return "Vinculado", candidates[0], "folio_control"
-        if len(candidates) > 1:
-            # Desempata con firma del número del oficio.
-            sig = _office_number_signature(name)
-            narrowed = [
-                row for row in candidates
-                if _office_number_signature(row.get("numero_oficio") or "") == sig
-            ]
-            if len(narrowed) == 1:
-                return "Vinculado", narrowed[0], "folio_control+numero"
-            return "Ambiguo", None, "folio_control"
+            office = candidates[0]
+            client.table("oficios_direccion_general").update({
+                "drive_url": record["url_drive"],
+                "drive_nombre_archivo": record["nombre_archivo"],
+                "drive_vinculado_at": now_iso,
+                "updated_at": now_iso,
+            }).eq("id", office["id"]).execute()
+            linked += 1
+            details.append({
+                "numero_oficio": record["numero_oficio"],
+                "estado": "Vinculado",
+                "url_drive": record["url_drive"],
+            })
+        elif len(candidates) > 1:
+            ambiguous += 1
+            details.append({
+                "numero_oficio": record["numero_oficio"],
+                "estado": "Ambiguo",
+                "url_drive": record["url_drive"],
+            })
+        else:
+            unmatched += 1
+            details.append({
+                "numero_oficio": record["numero_oficio"],
+                "estado": "Sin coincidencia",
+                "url_drive": record["url_drive"],
+            })
 
-    sig = _office_number_signature(name)
-    if all(sig):
-        candidates = by_signature.get(sig, [])
-        if len(candidates) == 1:
-            return "Vinculado", candidates[0], "numero_oficio"
-        if len(candidates) > 1:
-            return "Ambiguo", None, "numero_oficio"
-
-    return "Sin coincidencia", None, "sin_match"
-
-
-def _latest_drive_sync(client):
+    # Guardar bitácora de importación.
     try:
-        rows = (client.table("sincronizaciones_drive_oficios_dg").select("*")
+        client.table("ingestas_vinculos_drive_oficios_dg").insert({
+            "nombre_archivo": getattr(uploaded, "name", None),
+            "registros_detectados": len(records),
+            "registros_vinculados": linked,
+            "registros_ambiguos": ambiguous,
+            "registros_sin_coincidencia": unmatched,
+            "importado_por": st.session_state.user["id"],
+            "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"),
+            "detalle": details,
+            "created_at": now_iso,
+        }).execute()
+    except Exception:
+        pass
+
+    return {
+        "detectados": len(records),
+        "vinculados": linked,
+        "ambiguos": ambiguous,
+        "sin_coincidencia": unmatched,
+        "warnings": warnings,
+        "details": details,
+    }
+
+
+def _latest_drive_link_import(client):
+    try:
+        rows = (client.table("ingestas_vinculos_drive_oficios_dg").select("*")
                 .order("created_at", desc=True).limit(1).execute().data or [])
         return rows[0] if rows else None
     except Exception:
         return None
-
-
-def _sync_drive_official_letters(client) -> dict:
-    if not _drive_configured():
-        raise RuntimeError(
-            "Falta configurar Google Drive en Streamlit Secrets. "
-            "Consulta el archivo CONFIGURACION_GOOGLE_DRIVE.txt."
-        )
-
-    author_name = st.session_state.user.get("nombre") or st.session_state.user.get("email")
-    log = client.table("sincronizaciones_drive_oficios_dg").insert({
-        "folder_id": GOOGLE_DRIVE_DG_FOLDER_ID,
-        "estado": "Procesando",
-        "sincronizado_por": st.session_state.user["id"],
-        "autor_nombre": author_name,
-    }).execute().data[0]
-    log_id = str(log["id"])
-
-    try:
-        session = _drive_session()
-        drive_files = _drive_list_files_recursive(session, GOOGLE_DRIVE_DG_FOLDER_ID)
-        pdf_files = [
-            item for item in drive_files
-            if item.get("mimeType") == "application/pdf"
-            or str(item.get("name") or "").lower().endswith(".pdf")
-        ]
-
-        offices = client.table("oficios_direccion_general").select(
-            "id,anio,mes,numero_oficio,folio_control,drive_file_id"
-        ).execute().data or []
-        by_folio, by_signature = _build_office_indexes(offices)
-
-        linked = ambiguous = unmatched = 0
-        inventory_payload = []
-        now_iso = datetime.now().isoformat()
-
-        for item in pdf_files:
-            status, office, criterion = _match_drive_file(item, by_folio, by_signature)
-            office_id = str(office["id"]) if office else None
-            if status == "Vinculado":
-                linked += 1
-                client.table("oficios_direccion_general").update({
-                    "drive_file_id": item.get("id"),
-                    "drive_url": item.get("webViewLink"),
-                    "drive_nombre_archivo": item.get("name"),
-                    "drive_mime_type": item.get("mimeType"),
-                    "drive_size_bytes": int(item.get("size")) if item.get("size") else None,
-                    "drive_modified_at": item.get("modifiedTime"),
-                    "drive_sincronizado_at": now_iso,
-                    "updated_at": now_iso,
-                }).eq("id", office_id).execute()
-            elif status == "Ambiguo":
-                ambiguous += 1
-            else:
-                unmatched += 1
-
-            seq, month, year = _office_number_signature(item.get("name") or "")
-            inventory_payload.append({
-                "drive_file_id": item.get("id"),
-                "drive_nombre_archivo": item.get("name"),
-                "drive_url": item.get("webViewLink"),
-                "drive_mime_type": item.get("mimeType"),
-                "drive_size_bytes": int(item.get("size")) if item.get("size") else None,
-                "drive_modified_at": item.get("modifiedTime"),
-                "folio_detectado": _drive_filename_folio(item.get("name") or ""),
-                "numero_detectado": seq,
-                "mes_detectado": int(month) if month else None,
-                "anio_detectado": int(year) if year else None,
-                "estado_match": status,
-                "criterio_match": criterion,
-                "oficio_id": office_id,
-                "ultima_sincronizacion_id": log_id,
-                "updated_at": now_iso,
-            })
-
-        for offset in range(0, len(inventory_payload), 100):
-            client.table("inventario_drive_oficios_dg").upsert(
-                inventory_payload[offset:offset + 100],
-                on_conflict="drive_file_id",
-            ).execute()
-
-        summary = {
-            "estado": "Completada",
-            "archivos_detectados": len(pdf_files),
-            "archivos_vinculados": linked,
-            "archivos_ambiguos": ambiguous,
-            "archivos_sin_coincidencia": unmatched,
-            "completed_at": now_iso,
-        }
-        client.table("sincronizaciones_drive_oficios_dg").update(summary).eq("id", log_id).execute()
-        return {**log, **summary}
-    except Exception as exc:
-        client.table("sincronizaciones_drive_oficios_dg").update({
-            "estado": "Error",
-            "detalle_error": str(exc),
-            "completed_at": datetime.now().isoformat(),
-        }).eq("id", log_id).execute()
-        raise
-
-
-def _drive_reconciliation_panel(client):
-    try:
-        rows = (client.table("inventario_drive_oficios_dg").select("*")
-                .in_("estado_match", ["Ambiguo", "Sin coincidencia"])
-                .order("drive_nombre_archivo").execute().data or [])
-    except Exception:
-        rows = []
-
-    if not rows:
-        st.success("No hay documentos pendientes de conciliación.")
-        return
-
-    st.markdown(f"### Por conciliar · {len(rows)}")
-    st.caption("Archivos de Drive que no pudieron vincularse de forma inequívoca con el control ENVIADOS DG.")
-
-    display = pd.DataFrame([{
-        "Archivo Drive": row.get("drive_nombre_archivo"),
-        "Estado": row.get("estado_match"),
-        "Folio detectado": row.get("folio_detectado"),
-        "Número detectado": row.get("numero_detectado"),
-        "Mes": row.get("mes_detectado"),
-        "Año": row.get("anio_detectado"),
-    } for row in rows])
-    st.dataframe(display, use_container_width=True, hide_index=True)
 
 
 OFFICIAL_LETTER_YEARS = list(range(2024, 2031))
@@ -2882,7 +2744,7 @@ def _official_letter_card(client, document: dict):
     date_label = str(document.get("fecha_oficio") or "")[:10] or f"{month_name} {document.get('anio') or ''}".strip()
     recipient = document.get("destinatario") or "Sin destinatario"
     has_supabase_file = bool(document.get("ruta_storage"))
-    has_drive_file = bool(document.get("drive_file_id"))
+    has_drive_link = bool(document.get("drive_url"))
 
     with st.container(border=True):
         info, actions = st.columns([4.6, 2.1], vertical_alignment="center")
@@ -2899,24 +2761,15 @@ def _official_letter_card(client, document: dict):
             f"Solicitado por: {html.escape(document.get('solicitado_por') or 'Sin dato')}"
         )
 
-        if has_drive_file:
+        if has_drive_link:
             actions.success("Firmado en Drive")
-            drive_cols = actions.columns(2)
-            if drive_cols[0].button("Ver", key=f"drive_preview_{document['id']}", use_container_width=True):
-                st.session_state[f"show_drive_{document['id']}"] = not st.session_state.get(f"show_drive_{document['id']}", False)
-                st.rerun()
-            if document.get("drive_url"):
-                drive_cols[1].link_button("Abrir Drive", document["drive_url"], use_container_width=True)
-
-            if st.session_state.get(f"show_drive_{document['id']}"):
-                try:
-                    with st.spinner("Cargando PDF desde Google Drive…"):
-                        drive_data = _drive_download_file(document["drive_file_id"])
-                    st.markdown("##### Vista previa · Google Drive")
-                    _pdf_preview(drive_data, 650)
-                except Exception as exc:
-                    st.error(f"No fue posible abrir el documento desde Drive: {exc}")
-
+            actions.link_button(
+                "Ver oficio en Drive",
+                document["drive_url"],
+                use_container_width=True,
+            )
+            if document.get("drive_nombre_archivo"):
+                actions.caption(document["drive_nombre_archivo"])
         elif has_supabase_file:
             try:
                 data = client.storage.from_("expedientes").download(document["ruta_storage"])
@@ -2940,18 +2793,19 @@ def _official_letter_card(client, document: dict):
             actions.warning("Firmado pendiente")
 
         with st.expander("Expediente del oficio", expanded=False):
-            if has_drive_file:
-                st.caption(
-                    f"Documento vinculado desde Google Drive: "
-                    f"{document.get('drive_nombre_archivo') or 'archivo'}"
-                )
-                if document.get("drive_modified_at"):
-                    st.caption(f"Última modificación en Drive: {str(document['drive_modified_at'])[:16].replace('T', ' · ')}")
+            if has_drive_link:
+                st.caption("Documento vinculado desde Google Drive.")
+                st.write(document.get("drive_url"))
+                if document.get("drive_vinculado_at"):
+                    st.caption(
+                        f"Vínculo actualizado: "
+                        f"{str(document['drive_vinculado_at'])[:16].replace('T', ' · ')}"
+                    )
             elif not has_supabase_file:
                 st.caption("No hay documento firmado vinculado todavía.")
 
-            # Se conserva carga manual como respaldo, pero Drive es el origen preferente.
-            if not has_drive_file:
+            # Carga manual sigue disponible como respaldo.
+            if not has_drive_link:
                 signed_upload = st.file_uploader(
                     "Carga manual de respaldo (opcional)",
                     type=["pdf", "docx", "jpg", "jpeg", "png"],
@@ -2985,7 +2839,7 @@ def official_letters_month(year: int, month: int, month_name: str):
             .eq("anio", year).eq("mes", month)
             .order("fila_origen").order("created_at").execute().data or [])
 
-    signed_count = sum(bool(row.get("ruta_storage") or row.get("drive_file_id")) for row in rows)
+    signed_count = sum(bool(row.get("ruta_storage") or row.get("drive_url")) for row in rows)
     metrics_html = (
         '<div class="metric-grid">'
         f'<div class="metric-box metric-blue"><div class="metric-label">Oficios registrados</div><div class="metric-value">{len(rows)}</div></div>'
@@ -3078,12 +2932,12 @@ def official_letters_year(year: int):
     counts = {month: {"total": 0, "signed": 0} for month, _ in MONTHS_ES}
     if client:
         try:
-            rows = client.table("oficios_direccion_general").select("mes,ruta_storage,drive_file_id").eq("anio", year).execute().data or []
+            rows = client.table("oficios_direccion_general").select("mes,ruta_storage,drive_url").eq("anio", year).execute().data or []
             for row in rows:
                 month_value = int(row.get("mes") or 0)
                 if month_value in counts:
                     counts[month_value]["total"] += 1
-                    counts[month_value]["signed"] += int(bool(row.get("ruta_storage") or row.get("drive_file_id")))
+                    counts[month_value]["signed"] += int(bool(row.get("ruta_storage") or row.get("drive_url")))
         except Exception:
             pass
     colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
@@ -3129,41 +2983,57 @@ def official_letters():
             if latest:
                 when = str(latest.get("completed_at") or latest.get("created_at") or "")[:16].replace("T", " · ")
                 st.info(f"Última ingesta: **{latest.get('nombre_archivo') or 'Archivo'}** · {latest.get('registros_detectados') or 0} registro(s) · por **{latest.get('autor_nombre') or 'Usuario'}** · {when} · {latest.get('estado') or ''}")
+
         with st.container(border=True):
-            st.markdown("### Sincronizar oficios firmados con Google Drive")
-            st.caption("Drive conserva los PDFs. El tablero sólo guarda el vínculo y permite visualizarlos sin duplicarlos en Supabase Storage.")
-            if _drive_configured():
-                sync_col, reconcile_col = st.columns(2)
-                if sync_col.button("Sincronizar Google Drive", type="primary", use_container_width=True, key="sync_dg_drive"):
+            st.markdown("### Importar vínculos de Google Drive")
+            st.caption(
+                "Los PDFs permanecen en Drive. Aquí sólo se vincula cada oficio con su URL, "
+                "sin duplicar archivos en Supabase."
+            )
+            link_file = st.file_uploader(
+                "Sube Excel o CSV con numero_oficio, nombre_archivo y url_drive",
+                type=["xlsx", "xls", "csv"],
+                key="drive_links_upload_dg",
+            )
+            if link_file:
+                if st.button(
+                    "Importar vínculos de Drive",
+                    type="primary",
+                    use_container_width=True,
+                    key="import_drive_links_dg",
+                ):
                     try:
-                        with st.spinner("Leyendo DIRECCION GENERAL y vinculando PDFs…"):
-                            result = _sync_drive_official_letters(client)
+                        with st.spinner("Cruzando vínculos con los oficios registrados…"):
+                            result = _import_drive_links(client, link_file)
                         st.success(
-                            f"Sincronización completada: {result.get('archivos_detectados', 0)} PDF(s) detectados · "
-                            f"{result.get('archivos_vinculados', 0)} vinculados · "
-                            f"{result.get('archivos_ambiguos', 0)} ambiguos · "
-                            f"{result.get('archivos_sin_coincidencia', 0)} sin coincidencia."
+                            f"Importación completada: {result['detectados']} detectados · "
+                            f"{result['vinculados']} vinculados · "
+                            f"{result['ambiguos']} ambiguos · "
+                            f"{result['sin_coincidencia']} sin coincidencia."
                         )
+                        if result["warnings"]:
+                            with st.expander("Advertencias de importación"):
+                                for warning in result["warnings"]:
+                                    st.write("•", warning)
+                        if result["ambiguos"] or result["sin_coincidencia"]:
+                            with st.expander("Registros que requieren revisión"):
+                                review = pd.DataFrame([
+                                    row for row in result["details"]
+                                    if row["estado"] != "Vinculado"
+                                ])
+                                st.dataframe(review, use_container_width=True, hide_index=True)
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"No fue posible sincronizar Drive: {exc}")
-                if reconcile_col.button("Ver documentos por conciliar", use_container_width=True, key="show_drive_reconcile"):
-                    st.session_state.show_drive_reconcile = not st.session_state.get("show_drive_reconcile", False)
-                    st.rerun()
-                latest_sync = _latest_drive_sync(client)
-                if latest_sync:
-                    when_sync = str(latest_sync.get("completed_at") or latest_sync.get("created_at") or "")[:16].replace("T", " · ")
-                    st.info(
-                        f"Última sincronización Drive: **{latest_sync.get('archivos_detectados') or 0} PDF(s)** · "
-                        f"{latest_sync.get('archivos_vinculados') or 0} vinculados · por "
-                        f"**{latest_sync.get('autor_nombre') or 'Usuario'}** · {when_sync} · "
-                        f"{latest_sync.get('estado') or ''}"
-                    )
-                if st.session_state.get("show_drive_reconcile"):
-                    _drive_reconciliation_panel(client)
-            else:
-                st.warning("Google Drive todavía no está configurado en Streamlit Secrets.")
-                st.caption("Usa CONFIGURACION_GOOGLE_DRIVE.txt y agrega google-auth a requirements.txt.")
+                        st.error(f"No fue posible importar los vínculos: {exc}")
+
+            latest_links = _latest_drive_link_import(client)
+            if latest_links:
+                when_links = str(latest_links.get("created_at") or "")[:16].replace("T", " · ")
+                st.info(
+                    f"Última importación de vínculos: **{latest_links.get('nombre_archivo') or 'Archivo'}** · "
+                    f"{latest_links.get('registros_vinculados') or 0} vinculados · por "
+                    f"**{latest_links.get('autor_nombre') or 'Usuario'}** · {when_links}"
+                )
     else:
         st.info("La ingesta del archivo de control estará disponible al conectar Supabase.")
     year_counts = {year: 0 for year in OFFICIAL_LETTER_YEARS}
