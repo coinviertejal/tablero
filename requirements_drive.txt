@@ -1,0 +1,2 @@
+# Agrega esta línea a tu requirements.txt
+google-auth>=2.30,<3
