@@ -2402,6 +2402,7 @@ def _parse_drive_links_file(uploaded) -> tuple[list[dict], list[str]]:
     frame.columns = [str(c).strip().lower() for c in frame.columns]
 
     aliases = {
+        "folio_control": ["folio_control", "folio control", "folio", "no", "n°", "numero_control", "número control"],
         "numero_oficio": ["numero_oficio", "número de oficio", "numero de oficio", "oficio"],
         "nombre_archivo": ["nombre_archivo", "nombre archivo", "archivo", "nombre del archivo"],
         "url_drive": ["url_drive", "url drive", "liga", "liga drive", "url", "enlace", "enlace drive"],
@@ -2414,41 +2415,58 @@ def _parse_drive_links_file(uploaded) -> tuple[list[dict], list[str]]:
                 resolved[target] = option
                 break
 
-    missing = [k for k in ("numero_oficio", "url_drive") if k not in resolved]
-    if missing:
+    if "url_drive" not in resolved or ("numero_oficio" not in resolved and "folio_control" not in resolved):
         raise ValueError(
-            "El archivo debe incluir al menos las columnas 'numero_oficio' y 'url_drive'. "
-            "La columna 'nombre_archivo' es opcional."
+            "El archivo debe incluir 'url_drive' y al menos una de estas columnas: "
+            "'folio_control' o 'numero_oficio'. 'nombre_archivo' es opcional."
         )
 
     records, warnings = [], []
     seen = set()
 
     for idx, row in frame.iterrows():
-        office_number = str(row.get(resolved["numero_oficio"], "") or "").strip()
+        office_number = ""
+        if "numero_oficio" in resolved:
+            office_number = str(row.get(resolved["numero_oficio"], "") or "").strip()
+        folio_control = ""
+        if "folio_control" in resolved:
+            folio_control = str(row.get(resolved["folio_control"], "") or "").strip()
         url = str(row.get(resolved["url_drive"], "") or "").strip()
         file_name = ""
         if "nombre_archivo" in resolved:
             file_name = str(row.get(resolved["nombre_archivo"], "") or "").strip()
 
         excel_row = idx + 2
-        if not office_number and not url:
+        if not office_number and not folio_control and not url:
             continue
-        if not office_number:
-            warnings.append(f"Fila {excel_row}: falta numero_oficio.")
+        if not office_number and not folio_control:
+            warnings.append(f"Fila {excel_row}: falta folio_control y numero_oficio.")
             continue
         if not url:
-            warnings.append(f"Fila {excel_row}: falta url_drive para {office_number}.")
+            warnings.append(f"Fila {excel_row}: falta url_drive.")
             continue
         if "drive.google.com" not in url:
-            warnings.append(f"Fila {excel_row}: la URL no parece ser de Google Drive: {office_number}.")
-        key = _normalize_office_link_key(office_number)
-        if key in seen:
-            warnings.append(f"Fila {excel_row}: número de oficio repetido en el archivo: {office_number}.")
-        seen.add(key)
+            warnings.append(
+                f"Fila {excel_row}: la URL no parece ser de Google Drive: "
+                f"{office_number or folio_control}."
+            )
+
+        folio_norm = re.sub(r"\.0$", "", folio_control.upper().strip())
+        folio_norm = re.sub(r"\s+", "", folio_norm)
+        key = _normalize_office_link_key(office_number) if office_number else ""
+
+        dedupe_key = folio_norm or key
+        if dedupe_key in seen:
+            warnings.append(
+                f"Fila {excel_row}: folio/número repetido en el archivo: "
+                f"{folio_control or office_number}."
+            )
+        seen.add(dedupe_key)
 
         records.append({
-            "numero_oficio": office_number,
+            "folio_control": folio_control or None,
+            "folio_normalizado": folio_norm,
+            "numero_oficio": office_number or None,
             "numero_normalizado": key,
             "nombre_archivo": file_name or None,
             "url_drive": url,
@@ -2466,20 +2484,34 @@ def _import_drive_links(client, uploaded) -> dict:
     ).execute().data or []
 
     index = {}
+    folio_index = {}
     for row in offices:
         key = _normalize_office_link_key(row.get("numero_oficio"))
         if key:
             index.setdefault(key, []).append(row)
+
+        folio = str(row.get("folio_control") or "").upper().strip()
+        folio = re.sub(r"\.0$", "", folio)
+        folio = re.sub(r"\s+", "", folio)
+        if folio:
+            folio_index.setdefault(folio, []).append(row)
 
     linked = ambiguous = unmatched = 0
     now_iso = datetime.now().isoformat()
     details = []
 
     for record in records:
-        candidates = index.get(record["numero_normalizado"], [])
+        # 1) Cruce preferente por folio_control / NO del Excel.
+        candidates = []
+        if record.get("folio_normalizado"):
+            candidates = folio_index.get(record["folio_normalizado"], [])
 
-        # Fallback por número consecutivo + mes + año si el formato difiere.
-        if not candidates:
+        # 2) Si no resolvió por folio, intenta número completo normalizado.
+        if not candidates and record.get("numero_normalizado"):
+            candidates = index.get(record["numero_normalizado"], [])
+
+        # 3) Fallback por consecutivo + mes + año si el formato difiere.
+        if not candidates and record.get("numero_normalizado"):
             m = re.search(r"(\d{1,3}(?:-BIS)?)\D+(\d{2})\D+(20\d{2})$", record["numero_normalizado"])
             if m:
                 seq, month, year = m.groups()
@@ -2502,21 +2534,24 @@ def _import_drive_links(client, uploaded) -> dict:
             }).eq("id", office["id"]).execute()
             linked += 1
             details.append({
-                "numero_oficio": record["numero_oficio"],
+                "folio_control": record.get("folio_control"),
+                "numero_oficio": record.get("numero_oficio"),
                 "estado": "Vinculado",
                 "url_drive": record["url_drive"],
             })
         elif len(candidates) > 1:
             ambiguous += 1
             details.append({
-                "numero_oficio": record["numero_oficio"],
+                "folio_control": record.get("folio_control"),
+                "numero_oficio": record.get("numero_oficio"),
                 "estado": "Ambiguo",
                 "url_drive": record["url_drive"],
             })
         else:
             unmatched += 1
             details.append({
-                "numero_oficio": record["numero_oficio"],
+                "folio_control": record.get("folio_control"),
+                "numero_oficio": record.get("numero_oficio"),
                 "estado": "Sin coincidencia",
                 "url_drive": record["url_drive"],
             })
@@ -3049,7 +3084,7 @@ def official_letters():
                             hide_index=True,
                         )
             link_file = st.file_uploader(
-                "Sube Excel o CSV con numero_oficio, nombre_archivo y url_drive",
+                "Sube Excel o CSV con folio_control, numero_oficio, nombre_archivo y url_drive",
                 type=["xlsx", "xls", "csv"],
                 key="drive_links_upload_dg",
             )
