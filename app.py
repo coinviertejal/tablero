@@ -41,7 +41,7 @@ MODULE_BOARD = "Junta de Gobierno"
 MODULE_COMMITTEES = "Comités"
 MODULE_OFFICIAL_LETTERS = "Oficios Dirección General"
 ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES, MODULE_OFFICIAL_LETTERS]
-USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
+USER_DIRECTIONS = ["Dirección General", "Dirección de Administración", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
 MASTER_ADMIN_EMAIL = "yani.limberopulos@jalisco.gob.mx"
 
@@ -1214,7 +1214,7 @@ COMMITTEE_CATALOG = [
     ("Comité de Archivo", "Gestión documental, conservación y cumplimiento archivístico.", "var(--orange)"),
     ("Comité de Control Interno", "Control institucional, riesgos y mejora continua.", "var(--green)"),
 ]
-BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
+BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Administración", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 
 
 def board_year_label(year: int) -> str:
