@@ -3031,7 +3031,7 @@ def official_letters():
     if selected_year:
         official_letters_year(int(selected_year)); return
     st.markdown('<h1 class="choice-title">Oficios Dirección General</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="choice-subtitle">Archivo institucional de oficios firmados · selecciona el año</p>', unsafe_allow_html=True)
+    st.markdown('<p class="choice-subtitle">Archivo institucional de oficios · selecciona el año</p>', unsafe_allow_html=True)
     if configured():
         client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
         with st.container(border=True):
@@ -3134,7 +3134,10 @@ def official_letters():
                 total_year = year_counts.get(year, 0)
                 label = "oficio" if total_year == 1 else "oficios"
                 st.markdown(
-                    f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p><b>{total_year}</b> {label}</p></div>',
+                    f'''<div class="year-card" style="--accent:{color}">
+                        <h2>{year}</h2>
+                        <p><b>{total_year}</b> {label}</p>
+                    </div>''',
                     unsafe_allow_html=True,
                 )
                 st.button(
