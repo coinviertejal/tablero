@@ -2824,10 +2824,12 @@ def _official_letter_card(client, document: dict):
 
 def official_letters_month(year: int, month: int, month_name: str):
     top1, top2 = st.columns([1, 5])
-    if top1.button("← Meses", use_container_width=True, key=f"official_back_months_{year}_{month}"):
-        st.session_state.pop("official_month", None)
-        st.session_state.pop("official_list_mode", None)
-        st.rerun()
+    top1.button(
+        "← Meses",
+        use_container_width=True,
+        key=f"official_back_months_{year}_{month}",
+        on_click=_back_official_months,
+    )
     top2.markdown(f"## Oficios Dirección General · {month_name} {year}")
 
     if not configured():
@@ -2922,10 +2924,36 @@ def official_letters_month(year: int, month: int, month_name: str):
         for row in filtered:
             _official_letter_card(client, row)
 
+
+def _go_official_year(year: int):
+    st.session_state["official_year"] = int(year)
+    st.session_state.pop("official_month", None)
+    st.session_state.pop("official_list_mode", None)
+
+
+def _go_official_month(month: int):
+    st.session_state["official_month"] = int(month)
+    st.session_state.pop("official_list_mode", None)
+
+
+def _back_official_years():
+    st.session_state.pop("official_year", None)
+    st.session_state.pop("official_month", None)
+    st.session_state.pop("official_list_mode", None)
+
+
+def _back_official_months():
+    st.session_state.pop("official_month", None)
+    st.session_state.pop("official_list_mode", None)
+
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
-    if top1.button("← Años", use_container_width=True, key=f"official_back_years_{year}"):
-        st.session_state.pop("official_year", None); st.session_state.pop("official_month", None); st.rerun()
+    top1.button(
+        "← Años",
+        use_container_width=True,
+        key=f"official_back_years_{year}",
+        on_click=_back_official_years,
+    )
     top2.markdown(f"## Oficios Dirección General · {year}")
     st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
@@ -2948,8 +2976,14 @@ def official_letters_year(year: int):
             count = counts.get(month, {"total": 0, "signed": 0})
             with columns[offset]:
                 st.markdown(f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{count["total"]} oficio(s) · {count["signed"]} firmado(s)</p></div>', unsafe_allow_html=True)
-                if st.button(f"Abrir {month_name}", key=f"official_month_{year}_{month}", use_container_width=True, type="primary"):
-                    st.session_state.official_month = month; st.rerun()
+                st.button(
+                    f"Abrir {month_name}",
+                    key=f"official_month_{year}_{month}",
+                    use_container_width=True,
+                    type="primary",
+                    on_click=_go_official_month,
+                    args=(month,),
+                )
 
 
 def official_letters():
@@ -2990,6 +3024,30 @@ def official_letters():
                 "Los PDFs permanecen en Drive. Aquí sólo se vincula cada oficio con su URL, "
                 "sin duplicar archivos en Supabase."
             )
+
+            last_result = st.session_state.get("drive_links_last_result")
+            if last_result:
+                st.success(
+                    f"Última importación: {last_result['detectados']} detectados · "
+                    f"{last_result['vinculados']} vinculados · "
+                    f"{last_result['ambiguos']} ambiguos · "
+                    f"{last_result['sin_coincidencia']} sin coincidencia."
+                )
+                if last_result.get("warnings"):
+                    with st.expander("Advertencias de la última importación"):
+                        for warning in last_result["warnings"]:
+                            st.write("•", warning)
+                pending_review = [
+                    row for row in last_result.get("details", [])
+                    if row.get("estado") != "Vinculado"
+                ]
+                if pending_review:
+                    with st.expander(f"Registros que requieren revisión · {len(pending_review)}"):
+                        st.dataframe(
+                            pd.DataFrame(pending_review),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
             link_file = st.file_uploader(
                 "Sube Excel o CSV con numero_oficio, nombre_archivo y url_drive",
                 type=["xlsx", "xls", "csv"],
@@ -3005,23 +3063,8 @@ def official_letters():
                     try:
                         with st.spinner("Cruzando vínculos con los oficios registrados…"):
                             result = _import_drive_links(client, link_file)
-                        st.success(
-                            f"Importación completada: {result['detectados']} detectados · "
-                            f"{result['vinculados']} vinculados · "
-                            f"{result['ambiguos']} ambiguos · "
-                            f"{result['sin_coincidencia']} sin coincidencia."
-                        )
-                        if result["warnings"]:
-                            with st.expander("Advertencias de importación"):
-                                for warning in result["warnings"]:
-                                    st.write("•", warning)
-                        if result["ambiguos"] or result["sin_coincidencia"]:
-                            with st.expander("Registros que requieren revisión"):
-                                review = pd.DataFrame([
-                                    row for row in result["details"]
-                                    if row["estado"] != "Vinculado"
-                                ])
-                                st.dataframe(review, use_container_width=True, hide_index=True)
+                        st.session_state["drive_links_last_result"] = result
+                        st.session_state["drive_links_last_filename"] = getattr(link_file, "name", "Archivo")
                         st.rerun()
                     except Exception as exc:
                         st.error(f"No fue posible importar los vínculos: {exc}")
@@ -3059,11 +3102,14 @@ def official_letters():
                     f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p><b>{total_year}</b> {label}</p></div>',
                     unsafe_allow_html=True,
                 )
-                if st.button(f"Abrir {year}", key=f"official_year_{year}", use_container_width=True, type="primary"):
-                    st.session_state.official_year = year
-                    st.session_state.pop("official_month", None)
-                    st.session_state.pop("official_list_mode", None)
-                    st.rerun()
+                st.button(
+                    f"Abrir {year}",
+                    key=f"official_year_{year}",
+                    use_container_width=True,
+                    type="primary",
+                    on_click=_go_official_year,
+                    args=(year,),
+                )
 
 def board_government():
     if not user_can(MODULE_BOARD):
