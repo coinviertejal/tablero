@@ -1624,6 +1624,91 @@ def _agreement_ficha_pdf(agreement: dict, session: dict, comments: list, history
     doc.build(story); return output.getvalue()
 
 
+
+def _active_notification_users(client) -> list[dict]:
+    """Usuarios activos que pueden ser responsables de avisos por correo."""
+    try:
+        rows = (
+            client.table("usuarios_autorizados")
+            .select("id,nombre,email,activo")
+            .eq("activo", True)
+            .order("nombre")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+    return [
+        row for row in rows
+        if str(row.get("email") or "").strip()
+    ]
+
+
+def _responsible_selector(
+    client,
+    *,
+    current_user_id=None,
+    current_email=None,
+    current_name=None,
+    key: str,
+):
+    users = _active_notification_users(client)
+    option_ids = [""] + [str(row["id"]) for row in users]
+    by_id = {str(row["id"]): row for row in users}
+
+    current_id = str(current_user_id or "")
+    if current_id not in option_ids:
+        # Permite conservar un responsable histórico aunque ya no esté activo.
+        current_id = ""
+
+    def _label(value):
+        if not value:
+            return "Sin responsable individual"
+        row = by_id.get(value, {})
+        name = row.get("nombre") or row.get("email") or "Usuario"
+        email = row.get("email") or ""
+        return f"{name} · {email}" if email else name
+
+    selected = st.selectbox(
+        "Responsable individual",
+        option_ids,
+        index=option_ids.index(current_id) if current_id in option_ids else 0,
+        format_func=_label,
+        key=key,
+        help="Esta persona recibirá el recordatorio automático cuando falten 3 días para la fecha compromiso.",
+    )
+    row = by_id.get(selected)
+    if row:
+        return {
+            "id": row.get("id"),
+            "nombre": row.get("nombre") or row.get("email"),
+            "email": row.get("email"),
+        }
+    return {"id": None, "nombre": None, "email": None}
+
+
+def _notification_status_caption(deadline, responsible_email, enabled, status):
+    if status == "Terminada":
+        return "El acuerdo está terminado; no se enviarán recordatorios."
+    if not enabled:
+        return "Recordatorio por correo desactivado."
+    if not deadline:
+        return "Falta definir la fecha compromiso para programar el aviso."
+    if not responsible_email:
+        return "Falta asignar un responsable individual con correo."
+    try:
+        days = (deadline - date.today()).days
+    except Exception:
+        return "Recordatorio configurado para 3 días antes del vencimiento."
+    if days > 3:
+        return f"Correo programado para 3 días antes del vencimiento · faltan {days} días."
+    if days == 3:
+        return "El correo corresponde enviarse hoy."
+    if 0 <= days < 3:
+        return f"Faltan {days} día(s). El aviso de 3 días ya debió generarse."
+    return "La fecha compromiso ya venció."
+
 def board_session_detail(session: dict):
     year = st.session_state.board_year
     year_label = board_year_label(int(year))
@@ -1777,6 +1862,33 @@ def board_session_detail(session: dict):
             display_statuses = {"Por iniciar": "Por iniciar", "En proceso": "En progreso", "Terminada": "Terminada"}
             new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
             new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
+            responsible = {"id": None, "nombre": None, "email": None}
+            notify_email = False
+            if not is_report:
+                st.markdown("##### Responsable y notificación")
+                nr1, nr2 = st.columns([2, 1])
+                with nr1:
+                    responsible = _responsible_selector(
+                        client,
+                        current_user_id=row.get("responsable_usuario_id"),
+                        current_email=row.get("responsable_email"),
+                        current_name=row.get("responsable_nombre"),
+                        key=f"board_responsible_{row['id']}",
+                    )
+                with nr2:
+                    notify_email = st.checkbox(
+                        "Enviar recordatorio por correo",
+                        value=bool(row.get("notificar_email", True)),
+                        key=f"board_notify_email_{row['id']}",
+                    )
+                st.caption(
+                    _notification_status_caption(
+                        new_date,
+                        responsible.get("email"),
+                        notify_email,
+                        new_status,
+                    )
+                )
             result_options = ["Pendiente", "Aprobado", "Rechazado"]
             current_result = row.get("resultado") or "Pendiente"
             new_result = current_result if is_report else st.selectbox("Resultado del acuerdo", result_options,
@@ -1790,9 +1902,23 @@ def board_session_detail(session: dict):
                     compliance = "En tiempo" if new_date and date.fromisoformat(str(close_date)[:10]) <= new_date else ("Extemporáneo" if new_date else "Sin fecha compromiso")
                 else:
                     close_date, compliance = None, None
-                client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "resultado": new_result, "fecha_compromiso": new_date.isoformat() if new_date else None,
-                    "fecha_cierre": close_date, "cumplimiento": compliance, "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute()
+                client.table("acuerdos_junta").update({
+                    "areas": new_areas,
+                    "estatus": new_status,
+                    "resultado": new_result,
+                    "fecha_compromiso": new_date.isoformat() if new_date else None,
+                    "fecha_cierre": close_date,
+                    "cumplimiento": compliance,
+                    "responsable_usuario_id": responsible.get("id"),
+                    "responsable_nombre": responsible.get("nombre"),
+                    "responsable_email": responsible.get("email"),
+                    "notificar_email": bool(notify_email),
+                    "updated_at": datetime.now().isoformat(),
+                }).eq("id", row["id"]).execute()
                 description = f"Estatus: {display_statuses[new_status]}; responsables: {', '.join(new_areas) or 'sin responsable'}; fecha compromiso: {new_date.isoformat() if new_date else 'sin fecha'}"
+                if responsible.get("email"):
+                    description += f"; responsable individual: {responsible.get('nombre') or responsible.get('email')} ({responsible.get('email')})"
+                description += f"; aviso por correo: {'sí' if notify_email else 'no'}"
                 if compliance: description += f"; cumplimiento: {compliance}"
                 client.table("historial_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
                     "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"), "descripcion": description}).execute()
@@ -2131,6 +2257,30 @@ def committee_session_detail(session: dict, client):
                                         key=f"committee_result_{item['id']}")
             current_date = date.fromisoformat(str(item["fecha_compromiso"])[:10]) if item.get("fecha_compromiso") else None
             deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}")
+            st.markdown("##### Responsable y notificación")
+            nr1, nr2 = st.columns([2, 1])
+            with nr1:
+                responsible = _responsible_selector(
+                    client,
+                    current_user_id=item.get("responsable_usuario_id"),
+                    current_email=item.get("responsable_email"),
+                    current_name=item.get("responsable_nombre"),
+                    key=f"committee_responsible_{item['id']}",
+                )
+            with nr2:
+                notify_email = st.checkbox(
+                    "Enviar recordatorio por correo",
+                    value=bool(item.get("notificar_email", True)),
+                    key=f"committee_notify_email_{item['id']}",
+                )
+            st.caption(
+                _notification_status_caption(
+                    deadline,
+                    responsible.get("email"),
+                    notify_email,
+                    status_value,
+                )
+            )
             comment = st.text_area("Comentario de seguimiento", value=item.get("comentario_seguimiento") or "",
                                    key=f"committee_comment_{item['id']}")
             st.markdown("#### Documentos de seguimiento")
@@ -2177,9 +2327,15 @@ def committee_session_detail(session: dict, client):
             if st.button("Guardar cambios de seguimiento", type="primary", use_container_width=True,
                          key=f"save_committee_followup_{item['id']}"):
                 client.table("acuerdos_comite").update({
-                    "areas": areas, "estatus": status_value, "resultado": result_value,
+                    "areas": areas,
+                    "estatus": status_value,
+                    "resultado": result_value,
                     "fecha_compromiso": deadline.isoformat() if deadline else None,
                     "comentario_seguimiento": comment.strip() or None,
+                    "responsable_usuario_id": responsible.get("id"),
+                    "responsable_nombre": responsible.get("nombre"),
+                    "responsable_email": responsible.get("email"),
+                    "notificar_email": bool(notify_email),
                     "actualizado_por": st.session_state.user["id"],
                 }).eq("id", item["id"]).execute()
                 st.success("Seguimiento guardado.")
