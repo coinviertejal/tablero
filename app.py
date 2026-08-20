@@ -4273,7 +4273,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 month_bars + month_labels
             ).properties(
                 height=300,
-                width=644,
+                width=930,
             )
 
             def horizontal_chart(field, selection, hover, title, color, filters, max_items=12):
@@ -4353,7 +4353,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     color="#35434b",
                 )
                 .encode(text="Etiqueta:N")
-                .properties(height=34, width=644)
+                .properties(height=34, width=930)
             )
 
             recipient_chart = horizontal_chart(
