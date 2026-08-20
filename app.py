@@ -3498,6 +3498,24 @@ def _dedupe_office_rows(rows: list[dict]) -> list[dict]:
     return [chosen[key] for key in order]
 
 
+
+def _official_status_text(row: dict) -> str:
+    for field in ("status_control", "estatus", "status", "firma"):
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _official_is_cancelled(row: dict) -> bool:
+    return "CANCEL" in _official_status_text(row).upper()
+
+
+def _official_active_rows(rows: list[dict]) -> list[dict]:
+    return [row for row in (rows or []) if not _official_is_cancelled(row)]
+
+
+
 def official_letters_month(year: int, month: int, month_name: str):
     top1, top2 = st.columns([1, 5])
     top1.button(
@@ -3653,17 +3671,8 @@ def _official_letters_analytics(year: int, rows: list[dict]):
     # para los oficios cancelados.
     rows = _dedupe_office_rows(rows)
 
-    def _status_text(row):
-        for field in ("status_control", "estatus", "status", "firma"):
-            value = str(row.get(field) or "").strip()
-            if value:
-                return value
-        return ""
-
-    def _is_cancelled(row):
-        return "CANCEL" in _status_text(row).upper()
-
-    cancelled_rows = [row for row in rows if _is_cancelled(row)]
+    cancelled_rows = [row for row in rows if _official_is_cancelled(row)]
+    active_rows = _official_active_rows(rows)
 
     def _render_analytics_block(data_rows: list[dict], title: str, subtitle: str, cancelled_mode: bool = False):
         month_names = {month: name for month, name in MONTHS_ES}
@@ -3708,7 +3717,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
         )
 
         metric_cards = [
-            ("Total de oficios" if not cancelled_mode else "Total cancelados", total, "#0798cf" if not cancelled_mode else "#f68b08"),
+            ("Oficios no cancelados" if not cancelled_mode else "Total cancelados", total, "#0798cf" if not cancelled_mode else "#f68b08"),
             ("Promedio por mes activo", f"{avg:.1f}", "#009b4c"),
             ("Destinatarios únicos", unique_recipients, "#16ad8f"),
             ("Solicitantes únicos", unique_requesters, "#a990c7"),
@@ -3877,11 +3886,12 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     use_container_width=True,
                 )
 
-    # Analítica principal: exactamente el esquema anterior.
+    # Analítica principal: sólo oficios vigentes/no cancelados.
+    # Los cancelados se muestran exclusivamente en su tarjeta y drill-down.
     _render_analytics_block(
-        rows,
+        active_rows,
         f"Analítica de Oficios · {year}",
-        "Volumen mensual, destinatarios y origen de las solicitudes.",
+        "Volumen mensual, destinatarios y origen de las solicitudes no canceladas.",
         cancelled_mode=False,
     )
 
@@ -3947,6 +3957,8 @@ def official_letters_year(year: int):
         except Exception:
             rows = []
 
+    active_rows_year = _official_active_rows(rows)
+
     months_tab, analytics_tab = st.tabs(["Meses", "Analítica"])
 
     with months_tab:
@@ -3955,7 +3967,7 @@ def official_letters_year(year: int):
             unsafe_allow_html=True,
         )
         counts = {month: 0 for month, _ in MONTHS_ES}
-        for row in rows:
+        for row in active_rows_year:
             try:
                 month_value = int(row.get("mes") or 0)
             except (TypeError, ValueError):
@@ -4089,20 +4101,21 @@ def official_letters():
         st.info("La ingesta del archivo de control estará disponible al conectar Supabase.")
     year_counts = {year: 0 for year in OFFICIAL_LETTER_YEARS}
     if configured():
-        try:
-            count_rows = (
-                client.table("oficios_direccion_general")
-                .select("id,anio,numero_oficio,folio_control")
-                .execute()
-                .data or []
-            )
-            unique_rows = _dedupe_office_rows(count_rows)
-            for row in unique_rows:
-                row_year = int(row.get("anio") or 0)
-                if row_year in year_counts:
-                    year_counts[row_year] += 1
-        except Exception:
-            pass
+        for year in OFFICIAL_LETTER_YEARS:
+            try:
+                year_rows = (
+                    client.table("oficios_direccion_general")
+                    .select("id,anio,mes,numero_oficio,folio_control,status_control,firma")
+                    .eq("anio", year)
+                    .execute()
+                    .data or []
+                )
+                year_rows = _dedupe_office_rows(year_rows)
+                # La tarjeta anual muestra todos los oficios únicos registrados,
+                # incluyendo los cancelados. Los cancelados se analizan aparte.
+                year_counts[year] = len(year_rows)
+            except Exception:
+                year_counts[year] = 0
 
     colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)", "var(--blue)"]
     for start in (0, 3, 6):
