@@ -4126,114 +4126,178 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             use_container_width=True,
         )
 
-        left, right = st.columns(2, gap="large")
-        with left:
-            st.markdown("### Principales destinatarios")
-            st.caption(
-                "Personas que concentran el mayor número de oficios."
-                if not cancelled_mode
-                else "Destinatarios que concentran el mayor número de oficios cancelados."
-            )
-            top_recipients = recipients.head(12).sort_values("Oficios", ascending=True)
-            if top_recipients.empty:
-                st.info("No hay información de destinatarios para este año.")
-            else:
-                recipient_order = top_recipients["Etiqueta"].tolist()
-                chart = (
-                    alt.Chart(top_recipients)
-                    .mark_bar(cornerRadiusEnd=8)
-                    .encode(
-                        y=alt.Y(
-                            "Etiqueta:N",
-                            sort=recipient_order,
-                            title=None,
-                            axis=alt.Axis(labelLimit=250),
-                        ),
-                        x=alt.X(
-                            "Oficios:Q",
-                            title="Número de oficios",
-                            axis=alt.Axis(tickMinStep=1),
-                        ),
-                        color=alt.value("#f68b08" if cancelled_mode else "#173b63"),
-                        tooltip=[
-                            alt.Tooltip("Etiqueta:N", title="Destinatario"),
-                            alt.Tooltip("Oficios:Q", format=".0f"),
-                        ],
-                    )
-                )
-                labels = (
-                    alt.Chart(top_recipients)
-                    .mark_text(
-                        align="left",
-                        baseline="middle",
-                        dx=6,
-                        fontWeight="bold",
-                        color="#35434b",
-                    )
-                    .encode(
-                        y=alt.Y("Etiqueta:N", sort=recipient_order),
-                        x="Oficios:Q",
-                        text=alt.Text("Oficios:Q", format=".0f"),
-                    )
-                )
-                st.altair_chart(
-                    (chart + labels).properties(height=430),
-                    use_container_width=True,
-                )
+        # Analítica institucional interactiva: destinatario, dependencia y solicitado por.
+        # Hover resalta; clic fija la selección y filtra las otras dos gráficas.
+        analytics_df = pd.DataFrame([
+            {
+                "Destinatario": str(row.get("destinatario") or "Sin destinatario").strip() or "Sin destinatario",
+                "Dependencia": str(row.get("dependencia") or "Sin dependencia").strip() or "Sin dependencia",
+                "Solicitado por": str(row.get("solicitado_por") or "Sin dato").strip() or "Sin dato",
+            }
+            for row in data_rows
+        ])
 
-        with right:
-            st.markdown("### Solicitado por")
-            st.caption(
-                "Áreas o personas que originan el mayor número de oficios."
-                if not cancelled_mode
-                else "Áreas o personas que originaron el mayor número de oficios cancelados."
+        if analytics_df.empty:
+            st.info("No hay información suficiente para generar la analítica institucional.")
+        else:
+            recipient_counts_df = (
+                analytics_df.groupby("Destinatario", dropna=False)
+                .size().reset_index(name="Oficios")
+                .sort_values("Oficios", ascending=False).head(12)
             )
-            top_requesters = requesters.head(12).sort_values("Oficios", ascending=True)
-            if top_requesters.empty:
-                st.info("No hay información de 'Solicitado por' para este año.")
-            else:
-                requester_order = top_requesters["Etiqueta"].tolist()
-                chart = (
-                    alt.Chart(top_requesters)
-                    .mark_bar(cornerRadiusEnd=8)
-                    .encode(
-                        y=alt.Y(
-                            "Etiqueta:N",
-                            sort=requester_order,
-                            title=None,
-                            axis=alt.Axis(labelLimit=250),
-                        ),
-                        x=alt.X(
-                            "Oficios:Q",
-                            title="Número de oficios",
-                            axis=alt.Axis(tickMinStep=1),
-                        ),
-                        color=alt.value("#f68b08" if cancelled_mode else "#6750a4"),
-                        tooltip=[
-                            alt.Tooltip("Etiqueta:N", title="Solicitado por"),
-                            alt.Tooltip("Oficios:Q", format=".0f"),
-                        ],
-                    )
+            dependency_counts_df = (
+                analytics_df.groupby("Dependencia", dropna=False)
+                .size().reset_index(name="Oficios")
+                .sort_values("Oficios", ascending=False).head(12)
+            )
+            requester_counts_df = (
+                analytics_df.groupby("Solicitado por", dropna=False)
+                .size().reset_index(name="Oficios")
+                .sort_values("Oficios", ascending=False).head(12)
+            )
+
+            recipient_click = alt.selection_point(
+                fields=["Destinatario"],
+                on="click",
+                clear="dblclick",
+                empty=True,
+                name="recipient_select",
+            )
+            dependency_click = alt.selection_point(
+                fields=["Dependencia"],
+                on="click",
+                clear="dblclick",
+                empty=True,
+                name="dependency_select",
+            )
+            requester_click = alt.selection_point(
+                fields=["Solicitado por"],
+                on="click",
+                clear="dblclick",
+                empty=True,
+                name="requester_select",
+            )
+
+            recipient_hover = alt.selection_point(
+                fields=["Destinatario"],
+                on="pointerover",
+                clear="pointerout",
+                empty=False,
+                name="recipient_hover",
+            )
+            dependency_hover = alt.selection_point(
+                fields=["Dependencia"],
+                on="pointerover",
+                clear="pointerout",
+                empty=False,
+                name="dependency_hover",
+            )
+            requester_hover = alt.selection_point(
+                fields=["Solicitado por"],
+                on="pointerover",
+                clear="pointerout",
+                empty=False,
+                name="requester_hover",
+            )
+
+            base_rows = alt.Chart(analytics_df)
+
+            # Use top labels as domains, but calculate counts from row-level data so
+            # cross-filtering works between all three charts.
+            recipient_domain = recipient_counts_df["Destinatario"].tolist()
+            dependency_domain = dependency_counts_df["Dependencia"].tolist()
+            requester_domain = requester_counts_df["Solicitado por"].tolist()
+
+            recipient_chart = (
+                base_rows
+                .transform_filter(dependency_click)
+                .transform_filter(requester_click)
+                .transform_filter(alt.FieldOneOfPredicate(field="Destinatario", oneOf=recipient_domain))
+                .transform_aggregate(Oficios="count()", groupby=["Destinatario"])
+                .mark_bar(cornerRadiusEnd=8)
+                .encode(
+                    y=alt.Y("Destinatario:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
+                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    color=alt.condition(
+                        recipient_click | recipient_hover,
+                        alt.value("#173b63"),
+                        alt.value("#9fb4c8"),
+                    ),
+                    opacity=alt.condition(recipient_click | recipient_hover, alt.value(1), alt.value(0.72)),
+                    tooltip=[
+                        alt.Tooltip("Destinatario:N", title="Destinatario"),
+                        alt.Tooltip("Oficios:Q", format=".0f"),
+                    ],
                 )
-                labels = (
-                    alt.Chart(top_requesters)
-                    .mark_text(
-                        align="left",
-                        baseline="middle",
-                        dx=6,
-                        fontWeight="bold",
-                        color="#35434b",
-                    )
-                    .encode(
-                        y=alt.Y("Etiqueta:N", sort=requester_order),
-                        x="Oficios:Q",
-                        text=alt.Text("Oficios:Q", format=".0f"),
-                    )
+                .add_params(recipient_click, recipient_hover)
+                .properties(height=420)
+            )
+
+            dependency_chart = (
+                base_rows
+                .transform_filter(recipient_click)
+                .transform_filter(requester_click)
+                .transform_filter(alt.FieldOneOfPredicate(field="Dependencia", oneOf=dependency_domain))
+                .transform_aggregate(Oficios="count()", groupby=["Dependencia"])
+                .mark_bar(cornerRadiusEnd=8)
+                .encode(
+                    y=alt.Y("Dependencia:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
+                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    color=alt.condition(
+                        dependency_click | dependency_hover,
+                        alt.value("#0a9b78"),
+                        alt.value("#a9d5c9"),
+                    ),
+                    opacity=alt.condition(dependency_click | dependency_hover, alt.value(1), alt.value(0.72)),
+                    tooltip=[
+                        alt.Tooltip("Dependencia:N", title="Dependencia"),
+                        alt.Tooltip("Oficios:Q", format=".0f"),
+                    ],
                 )
-                st.altair_chart(
-                    (chart + labels).properties(height=430),
-                    use_container_width=True,
+                .add_params(dependency_click, dependency_hover)
+                .properties(height=420)
+            )
+
+            requester_chart = (
+                base_rows
+                .transform_filter(recipient_click)
+                .transform_filter(dependency_click)
+                .transform_filter(alt.FieldOneOfPredicate(field="Solicitado por", oneOf=requester_domain))
+                .transform_aggregate(Oficios="count()", groupby=["Solicitado por"])
+                .mark_bar(cornerRadiusEnd=8)
+                .encode(
+                    y=alt.Y("Solicitado por:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
+                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    color=alt.condition(
+                        requester_click | requester_hover,
+                        alt.value("#6750a4"),
+                        alt.value("#c2b7df"),
+                    ),
+                    opacity=alt.condition(requester_click | requester_hover, alt.value(1), alt.value(0.72)),
+                    tooltip=[
+                        alt.Tooltip("Solicitado por:N", title="Solicitado por"),
+                        alt.Tooltip("Oficios:Q", format=".0f"),
+                    ],
                 )
+                .add_params(requester_click, requester_hover)
+                .properties(height=420)
+            )
+
+            st.markdown("### Destinatarios, dependencias y origen de los oficios")
+            st.caption(
+                "Pasa el mouse sobre una barra para resaltarla. Haz clic para filtrar las otras gráficas; "
+                "haz doble clic para limpiar la selección."
+            )
+            c_dest, c_dep, c_req = st.columns(3, gap="large")
+            with c_dest:
+                st.markdown("#### Principales destinatarios")
+                st.altair_chart(recipient_chart, use_container_width=True)
+            with c_dep:
+                st.markdown("#### Dependencias destinatarias")
+                st.altair_chart(dependency_chart, use_container_width=True)
+            with c_req:
+                st.markdown("#### Solicitado por")
+                st.altair_chart(requester_chart, use_container_width=True)
 
     # Analítica principal: sólo oficios vigentes/no cancelados.
     # Los cancelados se muestran exclusivamente en su tarjeta y drill-down.
