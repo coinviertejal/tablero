@@ -95,22 +95,23 @@ def master_delete_control(label: str, object_id: str, key: str, delete_action) -
     """Control destructivo con confirmación escrita, visible sólo al administrador maestro."""
     if not is_master_admin():
         return
-    with st.expander(f"Administración maestra · Eliminar {label}"):
-        st.warning("Esta acción es definitiva y eliminará también acuerdos, seguimiento y documentos relacionados.")
-        confirmation = st.text_input(
-            "Para confirmar, escribe ELIMINAR", key=f"master_delete_text_{key}",
-            placeholder="ELIMINAR",
-        )
-        if st.button(
-            f"Eliminar definitivamente {label}", key=f"master_delete_button_{key}",
-            type="primary", use_container_width=True, disabled=confirmation.strip() != "ELIMINAR",
-        ):
-            try:
-                delete_action()
-                st.success(f"{label.capitalize()} eliminado definitivamente.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"No fue posible eliminar {label}: {exc}")
+    with st.container(key=f"master_delete_panel_{key}"):
+        with st.expander(f"🟧 Administración maestra · Eliminar {label}"):
+            st.warning("Esta acción es definitiva y eliminará también acuerdos, seguimiento y documentos relacionados.")
+            confirmation = st.text_input(
+                "Para confirmar, escribe ELIMINAR", key=f"master_delete_text_{key}",
+                placeholder="ELIMINAR",
+            )
+            if st.button(
+                f"Eliminar definitivamente {label}", key=f"master_delete_button_{key}",
+                type="primary", use_container_width=True, disabled=confirmation.strip() != "ELIMINAR",
+            ):
+                try:
+                    delete_action()
+                    st.success(f"{label.capitalize()} eliminado definitivamente.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible eliminar {label}: {exc}")
 
 
 
@@ -188,16 +189,11 @@ def master_reset_agreement_control(
                         },
                     ).execute()
     
-                    # Limpia widgets persistentes de esta sesión para que no reaparezcan valores anteriores.
-                    prefixes = (
-                        "areas_", "status_", "date_", "result_", "board_responsibles_", "board_notify_email_",
-                        "committee_areas_", "committee_status_", "committee_result_", "committee_deadline_",
-                        "committee_responsibles_", "committee_notify_email_", "committee_comment_",
-                    )
-                    for session_key in list(st.session_state.keys()):
-                        if str(agreement_id) in str(session_key) and str(session_key).startswith(prefixes):
-                            st.session_state.pop(session_key, None)
-    
+                    # Cambia la generación de llaves de los widgets. En Streamlit, los widgets ya
+                    # instanciados pueden conservar valores anteriores aunque la BD ya se haya limpiado.
+                    nonce_key = f"agreement_widget_nonce_{agreement_id}"
+                    st.session_state[nonce_key] = int(st.session_state.get(nonce_key, 0)) + 1
+
                     st.success("Seguimiento reiniciado. El acuerdo base se conservó.")
                     st.rerun()
                 except Exception as exc:
@@ -254,6 +250,9 @@ st.markdown("""
 [class*="st-key-master_admin_panel_"] details > summary { background:linear-gradient(90deg,#f68b08,#e56f00)!important; color:white!important; border:1px solid #d96500!important; border-radius:10px!important; font-weight:800!important; }
 [class*="st-key-master_admin_panel_"] details > summary:hover { background:linear-gradient(90deg,#ff9b20,#f07400)!important; color:white!important; }
 [class*="st-key-master_admin_panel_"] details > summary * { color:white!important; }
+[class*="st-key-master_delete_panel_"] details > summary { background:linear-gradient(90deg,#f68b08,#e56f00)!important; color:white!important; border:1px solid #d96500!important; border-radius:10px!important; font-weight:800!important; }
+[class*="st-key-master_delete_panel_"] details > summary:hover { background:linear-gradient(90deg,#ff9b20,#f07400)!important; color:white!important; }
+[class*="st-key-master_delete_panel_"] details > summary * { color:white!important; }
 .fin-progress-wrap { margin:.8rem 0 1rem; }
 .fin-progress-head { display:flex; justify-content:space-between; gap:12px; align-items:end; margin-bottom:.45rem; }
 .fin-progress-label { color:#5f6c74; font-weight:800; }
@@ -2051,17 +2050,18 @@ def board_session_detail(session: dict):
                 kind="board",
                 key=f"board_{row['id']}",
             )
+            widget_nonce = int(st.session_state.get(f"agreement_widget_nonce_{row['id']}", 0))
             summary_status = "En progreso" if status == "En proceso" else status
             summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
             if not is_report: st.caption(f"_{_deadline_label(row.get('fecha_compromiso'), status)}_")
             if row.get("texto"): st.write(row["texto"])
             c1, c2, c3 = st.columns([2, 1, 1])
-            new_areas = c1.multiselect("Áreas responsables", BOARD_AREAS, default=row.get("areas") or [], key=f"areas_{row['id']}")
+            new_areas = c1.multiselect("Áreas responsables", BOARD_AREAS, default=row.get("areas") or [], key=f"areas_{row['id']}_{widget_nonce}")
             statuses = ["Por iniciar", "En proceso", "Terminada"]
             display_statuses = {"Por iniciar": "Por iniciar", "En proceso": "En progreso", "Terminada": "Terminada"}
-            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
-            new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
+            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}_{widget_nonce}")
+            new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}_{widget_nonce}")
             responsibles = []
             notify_email = False
             if not is_report:
@@ -2072,13 +2072,13 @@ def board_session_detail(session: dict):
                         client,
                         required_module=MODULE_BOARD,
                         current_responsibles=_legacy_responsibles_from_row(row),
-                        key=f"board_responsibles_{row['id']}",
+                        key=f"board_responsibles_{row['id']}_{widget_nonce}",
                     )
                 with nr2:
                     notify_email = st.checkbox(
                         "Enviar recordatorio por correo",
                         value=bool(row.get("notificar_email", True)),
-                        key=f"board_notify_email_{row['id']}",
+                        key=f"board_notify_email_{row['id']}_{widget_nonce}",
                     )
                 st.caption(
                     _notification_status_caption(
@@ -2091,7 +2091,7 @@ def board_session_detail(session: dict):
             result_options = ["Pendiente", "Aprobado", "Rechazado"]
             current_result = row.get("resultado") or "Pendiente"
             new_result = current_result if is_report else st.selectbox("Resultado del acuerdo", result_options,
-                index=result_options.index(current_result), key=f"result_{row['id']}")
+                index=result_options.index(current_result), key=f"result_{row['id']}_{widget_nonce}")
             if not is_report: c3.caption(_deadline_label(new_date.isoformat() if new_date else None, new_status))
             def save_follow_up():
                 close_date = row.get("fecha_cierre")
@@ -2450,6 +2450,7 @@ def committee_session_detail(session: dict, client):
                 kind="committee",
                 key=f"committee_{item['id']}",
             )
+            widget_nonce = int(st.session_state.get(f"agreement_widget_nonce_{item['id']}", 0))
             st.caption(item.get("tipo_registro") or "Punto")
             st.write(item.get("texto") or "Sin descripción adicional.")
             if is_report:
@@ -2457,16 +2458,16 @@ def committee_session_detail(session: dict, client):
                 continue
             area_value = item.get("areas") or []
             areas = st.multiselect("Áreas responsables", BOARD_AREAS, default=[a for a in area_value if a in BOARD_AREAS],
-                                   key=f"committee_areas_{item['id']}")
+                                   key=f"committee_areas_{item['id']}_{widget_nonce}")
             c1, c2, c3 = st.columns(3)
             status_value = c1.selectbox("Estatus", ["Por iniciar", "En proceso", "Terminada"],
                                         index=["Por iniciar", "En proceso", "Terminada"].index(status if status in ["Por iniciar", "En proceso", "Terminada"] else "Por iniciar"),
-                                        key=f"committee_status_{item['id']}")
+                                        key=f"committee_status_{item['id']}_{widget_nonce}")
             result_value = c2.selectbox("Resultado", ["Pendiente", "Aprobado", "Rechazado"],
                                         index=["Pendiente", "Aprobado", "Rechazado"].index(item.get("resultado") if item.get("resultado") in ["Pendiente", "Aprobado", "Rechazado"] else "Pendiente"),
-                                        key=f"committee_result_{item['id']}")
+                                        key=f"committee_result_{item['id']}_{widget_nonce}")
             current_date = date.fromisoformat(str(item["fecha_compromiso"])[:10]) if item.get("fecha_compromiso") else None
-            deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}")
+            deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}_{widget_nonce}")
             st.markdown("##### Responsables y notificación")
             nr1, nr2 = st.columns([3, 1])
             with nr1:
@@ -2474,13 +2475,13 @@ def committee_session_detail(session: dict, client):
                     client,
                     required_module=MODULE_COMMITTEES,
                     current_responsibles=_legacy_responsibles_from_row(item),
-                    key=f"committee_responsibles_{item['id']}",
+                    key=f"committee_responsibles_{item['id']}_{widget_nonce}",
                 )
             with nr2:
                 notify_email = st.checkbox(
                     "Enviar recordatorio por correo",
                     value=bool(item.get("notificar_email", True)),
-                    key=f"committee_notify_email_{item['id']}",
+                    key=f"committee_notify_email_{item['id']}_{widget_nonce}",
                 )
             st.caption(
                 _notification_status_caption(
@@ -2491,7 +2492,7 @@ def committee_session_detail(session: dict, client):
                 )
             )
             comment = st.text_area("Comentario de seguimiento", value=item.get("comentario_seguimiento") or "",
-                                   key=f"committee_comment_{item['id']}")
+                                   key=f"committee_comment_{item['id']}_{widget_nonce}")
             st.markdown("#### Documentos de seguimiento")
             st.caption("Adjunta evidencias, oficios, informes o entregables vinculados exclusivamente a este acuerdo.")
             file_name_col, file_col = st.columns([2, 3])
