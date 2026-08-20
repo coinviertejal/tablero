@@ -4082,222 +4082,151 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             unsafe_allow_html=True,
         )
 
-        st.markdown("### Oficios por mes" if not cancelled_mode else "### Cancelados por mes")
+        st.markdown("### Tablero interactivo de oficios" if not cancelled_mode else "### Tablero interactivo de cancelados")
         st.caption(
-            "Total de oficios enviados en cada mes."
-            if not cancelled_mode
-            else "Total de oficios cancelados registrados en cada mes."
+            "Haz clic en cualquier barra para usarla como filtro de las demás gráficas. "
+            "Puedes combinar filtros; haz doble clic sobre una selección para limpiarla."
         )
 
-        chart_range = [
-            "#0798cf", "#009b4c", "#16ad8f", "#a990c7",
-            "#f68b08", "#858e93", "#0798cf", "#009b4c",
-            "#16ad8f", "#a990c7", "#f68b08", "#858e93",
-        ]
-        if cancelled_mode:
-            chart_range = ["#f68b08"] * 12
+        # Todas las visualizaciones comparten un mismo conjunto de datos y selecciones.
+        # Esto permite que Mes, Destinatario, Dependencia, Solicitado por y Tema
+        # funcionen como filtros cruzados entre sí.
+        dashboard_rows = _official_theme_rows(data_rows)
+        month_names = {month: name for month, name in MONTHS_ES}
+        month_order = [name for _, name in MONTHS_ES]
 
-        month_chart = (
-            alt.Chart(monthly)
-            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
-            .encode(
-                x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
-                y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                color=alt.Color(
-                    "Mes:N",
-                    sort=month_order,
-                    scale=alt.Scale(domain=month_order, range=chart_range),
-                    legend=None,
-                ),
-                tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
+        dashboard_df = pd.DataFrame([
+            {
+                "Mes": month_names.get(int(row.get("mes") or 0), "Sin mes"),
+                "Destinatario": str(row.get("destinatario") or "Sin destinatario").strip() or "Sin destinatario",
+                "Dependencia": str(row.get("dependencia") or "Sin dependencia").strip() or "Sin dependencia",
+                "Solicitado por": str(row.get("solicitado_por") or "Sin dato").strip() or "Sin dato",
+                "Tema": str(row.get("tema") or "Otros / por clasificar").strip() or "Otros / por clasificar",
+            }
+            for row in dashboard_rows
+        ])
+
+        if dashboard_df.empty:
+            st.info("No hay información suficiente para generar el tablero interactivo.")
+        else:
+            # Dominios top para evitar gráficas ilegibles, manteniendo el filtrado sobre datos fila a fila.
+            top_recipients = (
+                dashboard_df.groupby("Destinatario").size().sort_values(ascending=False).head(12).index.tolist()
             )
-        )
-        month_labels = (
-            alt.Chart(monthly)
-            .mark_text(dy=-12, fontSize=14, fontWeight="bold", color="#35434b")
-            .encode(
+            top_dependencies = (
+                dashboard_df.groupby("Dependencia").size().sort_values(ascending=False).head(12).index.tolist()
+            )
+            top_requesters = (
+                dashboard_df.groupby("Solicitado por").size().sort_values(ascending=False).head(12).index.tolist()
+            )
+            top_themes = (
+                dashboard_df.groupby("Tema").size().sort_values(ascending=False).head(12).index.tolist()
+            )
+
+            # Selecciones persistentes por clic y resaltado por hover.
+            month_sel = alt.selection_point(fields=["Mes"], on="click", clear="dblclick", empty=True, name="mes_sel")
+            rec_sel = alt.selection_point(fields=["Destinatario"], on="click", clear="dblclick", empty=True, name="dest_sel")
+            dep_sel = alt.selection_point(fields=["Dependencia"], on="click", clear="dblclick", empty=True, name="dep_sel")
+            req_sel = alt.selection_point(fields=["Solicitado por"], on="click", clear="dblclick", empty=True, name="req_sel")
+            theme_sel = alt.selection_point(fields=["Tema"], on="click", clear="dblclick", empty=True, name="tema_sel")
+
+            month_hover = alt.selection_point(fields=["Mes"], on="pointerover", clear="pointerout", empty=False, name="mes_hover")
+            rec_hover = alt.selection_point(fields=["Destinatario"], on="pointerover", clear="pointerout", empty=False, name="dest_hover")
+            dep_hover = alt.selection_point(fields=["Dependencia"], on="pointerover", clear="pointerout", empty=False, name="dep_hover")
+            req_hover = alt.selection_point(fields=["Solicitado por"], on="pointerover", clear="pointerout", empty=False, name="req_hover")
+            theme_hover = alt.selection_point(fields=["Tema"], on="pointerover", clear="pointerout", empty=False, name="tema_hover")
+
+            base = alt.Chart(dashboard_df)
+
+            month_base = (
+                base
+                .transform_filter(rec_sel)
+                .transform_filter(dep_sel)
+                .transform_filter(req_sel)
+                .transform_filter(theme_sel)
+                .transform_aggregate(Oficios="count()", groupby=["Mes"])
+            )
+            month_bars = (
+                month_base.mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
+                .encode(
+                    x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    color=alt.condition(
+                        month_sel | month_hover,
+                        alt.Color("Mes:N", sort=month_order, legend=None),
+                        alt.value("#c3cbd1"),
+                    ),
+                    opacity=alt.condition(month_sel | month_hover, alt.value(1), alt.value(0.8)),
+                    tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
+                )
+                .add_params(month_sel, month_hover)
+            )
+            month_labels = month_base.mark_text(dy=-10, fontSize=12, fontWeight="bold", color="#35434b").encode(
                 x=alt.X("Mes:N", sort=month_order),
                 y="Oficios:Q",
                 text=alt.Text("Oficios:Q", format=".0f"),
             )
-        )
-        st.altair_chart(
-            (month_chart + month_labels).properties(height=390),
-            use_container_width=True,
-        )
-
-        # Analítica institucional interactiva: destinatario, dependencia y solicitado por.
-        # Hover resalta; clic fija la selección y filtra las otras dos gráficas.
-        analytics_df = pd.DataFrame([
-            {
-                "Destinatario": str(row.get("destinatario") or "Sin destinatario").strip() or "Sin destinatario",
-                "Dependencia": str(row.get("dependencia") or "Sin dependencia").strip() or "Sin dependencia",
-                "Solicitado por": str(row.get("solicitado_por") or "Sin dato").strip() or "Sin dato",
-            }
-            for row in data_rows
-        ])
-
-        if analytics_df.empty:
-            st.info("No hay información suficiente para generar la analítica institucional.")
-        else:
-            recipient_counts_df = (
-                analytics_df.groupby("Destinatario", dropna=False)
-                .size().reset_index(name="Oficios")
-                .sort_values("Oficios", ascending=False).head(12)
-            )
-            dependency_counts_df = (
-                analytics_df.groupby("Dependencia", dropna=False)
-                .size().reset_index(name="Oficios")
-                .sort_values("Oficios", ascending=False).head(12)
-            )
-            requester_counts_df = (
-                analytics_df.groupby("Solicitado por", dropna=False)
-                .size().reset_index(name="Oficios")
-                .sort_values("Oficios", ascending=False).head(12)
+            month_chart = (month_bars + month_labels).properties(
+                height=300,
+                title=alt.TitleParams("Oficios por mes", anchor="start", fontSize=18, fontWeight="bold"),
             )
 
-            recipient_click = alt.selection_point(
-                fields=["Destinatario"],
-                on="click",
-                clear="dblclick",
-                empty=True,
-                name="recipient_select",
-            )
-            dependency_click = alt.selection_point(
-                fields=["Dependencia"],
-                on="click",
-                clear="dblclick",
-                empty=True,
-                name="dependency_select",
-            )
-            requester_click = alt.selection_point(
-                fields=["Solicitado por"],
-                on="click",
-                clear="dblclick",
-                empty=True,
-                name="requester_select",
-            )
-
-            recipient_hover = alt.selection_point(
-                fields=["Destinatario"],
-                on="pointerover",
-                clear="pointerout",
-                empty=False,
-                name="recipient_hover",
-            )
-            dependency_hover = alt.selection_point(
-                fields=["Dependencia"],
-                on="pointerover",
-                clear="pointerout",
-                empty=False,
-                name="dependency_hover",
-            )
-            requester_hover = alt.selection_point(
-                fields=["Solicitado por"],
-                on="pointerover",
-                clear="pointerout",
-                empty=False,
-                name="requester_hover",
-            )
-
-            base_rows = alt.Chart(analytics_df)
-
-            # Use top labels as domains, but calculate counts from row-level data so
-            # cross-filtering works between all three charts.
-            recipient_domain = recipient_counts_df["Destinatario"].tolist()
-            dependency_domain = dependency_counts_df["Dependencia"].tolist()
-            requester_domain = requester_counts_df["Solicitado por"].tolist()
-
-            recipient_chart = (
-                base_rows
-                .transform_filter(dependency_click)
-                .transform_filter(requester_click)
-                .transform_filter(alt.FieldOneOfPredicate(field="Destinatario", oneOf=recipient_domain))
-                .transform_aggregate(Oficios="count()", groupby=["Destinatario"])
-                .mark_bar(cornerRadiusEnd=8)
-                .encode(
-                    y=alt.Y("Destinatario:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
-                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                    color=alt.condition(
-                        recipient_click | recipient_hover,
-                        alt.value("#173b63"),
-                        alt.value("#9fb4c8"),
-                    ),
-                    opacity=alt.condition(recipient_click | recipient_hover, alt.value(1), alt.value(0.72)),
-                    tooltip=[
-                        alt.Tooltip("Destinatario:N", title="Destinatario"),
-                        alt.Tooltip("Oficios:Q", format=".0f"),
-                    ],
+            def horizontal_chart(field, domain, selection, hover, title, color, filters):
+                chart = base
+                for f in filters:
+                    chart = chart.transform_filter(f)
+                chart = (
+                    chart
+                    .transform_filter(alt.FieldOneOfPredicate(field=field, oneOf=domain))
+                    .transform_aggregate(Oficios="count()", groupby=[field])
                 )
-                .add_params(recipient_click, recipient_hover)
-                .properties(height=420)
-            )
-
-            dependency_chart = (
-                base_rows
-                .transform_filter(recipient_click)
-                .transform_filter(requester_click)
-                .transform_filter(alt.FieldOneOfPredicate(field="Dependencia", oneOf=dependency_domain))
-                .transform_aggregate(Oficios="count()", groupby=["Dependencia"])
-                .mark_bar(cornerRadiusEnd=8)
-                .encode(
-                    y=alt.Y("Dependencia:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
-                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                    color=alt.condition(
-                        dependency_click | dependency_hover,
-                        alt.value("#0a9b78"),
-                        alt.value("#a9d5c9"),
-                    ),
-                    opacity=alt.condition(dependency_click | dependency_hover, alt.value(1), alt.value(0.72)),
-                    tooltip=[
-                        alt.Tooltip("Dependencia:N", title="Dependencia"),
-                        alt.Tooltip("Oficios:Q", format=".0f"),
-                    ],
+                bars = (
+                    chart.mark_bar(cornerRadiusEnd=8)
+                    .encode(
+                        y=alt.Y(f"{field}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=210)),
+                        x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                        color=alt.condition(selection | hover, alt.value(color), alt.value("#c7cdd2")),
+                        opacity=alt.condition(selection | hover, alt.value(1), alt.value(0.78)),
+                        tooltip=[alt.Tooltip(f"{field}:N", title=field), alt.Tooltip("Oficios:Q", format=".0f")],
+                    )
+                    .add_params(selection, hover)
                 )
-                .add_params(dependency_click, dependency_hover)
-                .properties(height=420)
-            )
-
-            requester_chart = (
-                base_rows
-                .transform_filter(recipient_click)
-                .transform_filter(dependency_click)
-                .transform_filter(alt.FieldOneOfPredicate(field="Solicitado por", oneOf=requester_domain))
-                .transform_aggregate(Oficios="count()", groupby=["Solicitado por"])
-                .mark_bar(cornerRadiusEnd=8)
-                .encode(
-                    y=alt.Y("Solicitado por:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
-                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                    color=alt.condition(
-                        requester_click | requester_hover,
-                        alt.value("#6750a4"),
-                        alt.value("#c2b7df"),
-                    ),
-                    opacity=alt.condition(requester_click | requester_hover, alt.value(1), alt.value(0.72)),
-                    tooltip=[
-                        alt.Tooltip("Solicitado por:N", title="Solicitado por"),
-                        alt.Tooltip("Oficios:Q", format=".0f"),
-                    ],
+                labels = chart.mark_text(align="left", baseline="middle", dx=5, fontSize=11, fontWeight="bold", color="#35434b").encode(
+                    y=alt.Y(f"{field}:N", sort="-x"),
+                    x="Oficios:Q",
+                    text=alt.Text("Oficios:Q", format=".0f"),
                 )
-                .add_params(requester_click, requester_hover)
-                .properties(height=420)
+                return (bars + labels).properties(
+                    height=320,
+                    width=310,
+                    title=alt.TitleParams(title, anchor="start", fontSize=16, fontWeight="bold"),
+                )
+
+            recipient_chart = horizontal_chart(
+                "Destinatario", top_recipients, rec_sel, rec_hover, "Principales destinatarios",
+                "#173b63", [month_sel, dep_sel, req_sel, theme_sel],
+            )
+            dependency_chart = horizontal_chart(
+                "Dependencia", top_dependencies, dep_sel, dep_hover, "Dependencias destinatarias",
+                "#0a9b78", [month_sel, rec_sel, req_sel, theme_sel],
+            )
+            requester_chart = horizontal_chart(
+                "Solicitado por", top_requesters, req_sel, req_hover, "Solicitado por",
+                "#6750a4", [month_sel, rec_sel, dep_sel, theme_sel],
+            )
+            theme_chart = horizontal_chart(
+                "Tema", top_themes, theme_sel, theme_hover, "Temas",
+                "#f68b08", [month_sel, rec_sel, dep_sel, req_sel],
             )
 
-            st.markdown("### Destinatarios, dependencias y origen de los oficios")
-            st.caption(
-                "Pasa el mouse sobre una barra para resaltarla. Haz clic para filtrar las otras gráficas; "
-                "haz doble clic para limpiar la selección."
-            )
-            c_dest, c_dep, c_req = st.columns(3, gap="large")
-            with c_dest:
-                st.markdown("#### Principales destinatarios")
-                st.altair_chart(recipient_chart, use_container_width=True)
-            with c_dep:
-                st.markdown("#### Dependencias destinatarias")
-                st.altair_chart(dependency_chart, use_container_width=True)
-            with c_req:
-                st.markdown("#### Solicitado por")
-                st.altair_chart(requester_chart, use_container_width=True)
+            dashboard = alt.vconcat(
+                month_chart,
+                alt.hconcat(recipient_chart, dependency_chart).resolve_scale(x="independent"),
+                alt.hconcat(requester_chart, theme_chart).resolve_scale(x="independent"),
+                spacing=28,
+            ).configure_view(stroke=None)
+
+            st.altair_chart(dashboard, use_container_width=True)
 
     # Analítica principal: sólo oficios vigentes/no cancelados.
     # Los cancelados se muestran exclusivamente en su tarjeta y drill-down.
