@@ -1625,12 +1625,13 @@ def _agreement_ficha_pdf(agreement: dict, session: dict, comments: list, history
 
 
 
-def _active_notification_users(client) -> list[dict]:
-    """Usuarios activos que pueden ser responsables de avisos por correo."""
+
+def _active_notification_users(client, required_module: str) -> list[dict]:
+    """Usuarios activos que pueden ser responsables según su nivel de acceso."""
     try:
         rows = (
             client.table("usuarios_autorizados")
-            .select("id,nombre,email,activo")
+            .select("id,nombre,email,activo,rol,direccion,modulos")
             .eq("activo", True)
             .order("nombre")
             .execute()
@@ -1639,75 +1640,168 @@ def _active_notification_users(client) -> list[dict]:
         )
     except Exception:
         return []
-    return [
-        row for row in rows
-        if str(row.get("email") or "").strip()
-    ]
+
+    allowed = []
+    for row in rows:
+        email = str(row.get("email") or "").strip()
+        if not email:
+            continue
+        modules = row.get("modulos") or []
+        if row.get("rol") == "administrador" or required_module in modules:
+            allowed.append(row)
+    return allowed
 
 
-def _responsible_selector(
+def _legacy_responsibles_from_row(row: dict) -> list[dict]:
+    current = row.get("responsables_notificacion")
+    if isinstance(current, list):
+        clean = []
+        for item in current:
+            if not isinstance(item, dict):
+                continue
+            email = str(item.get("email") or "").strip()
+            if email:
+                clean.append({
+                    "id": item.get("id"),
+                    "nombre": item.get("nombre") or email,
+                    "email": email,
+                    "direccion": item.get("direccion"),
+                })
+        if clean:
+            return clean
+
+    # Compatibilidad con la versión anterior de responsable único.
+    if row.get("responsable_email"):
+        return [{
+            "id": row.get("responsable_usuario_id"),
+            "nombre": row.get("responsable_nombre") or row.get("responsable_email"),
+            "email": row.get("responsable_email"),
+            "direccion": None,
+        }]
+    return []
+
+
+def _responsibles_selector(
     client,
     *,
-    current_user_id=None,
-    current_email=None,
-    current_name=None,
+    required_module: str,
+    current_responsibles: list[dict] | None,
     key: str,
 ):
-    users = _active_notification_users(client)
-    option_ids = [""] + [str(row["id"]) for row in users]
+    users = _active_notification_users(client, required_module)
     by_id = {str(row["id"]): row for row in users}
 
-    current_id = str(current_user_id or "")
-    if current_id not in option_ids:
-        # Permite conservar un responsable histórico aunque ya no esté activo.
-        current_id = ""
+    current_ids = []
+    for item in current_responsibles or []:
+        item_id = str(item.get("id") or "")
+        if item_id in by_id:
+            current_ids.append(item_id)
 
     def _label(value):
-        if not value:
-            return "Sin responsable individual"
         row = by_id.get(value, {})
         name = row.get("nombre") or row.get("email") or "Usuario"
         email = row.get("email") or ""
-        return f"{name} · {email}" if email else name
+        direction = row.get("direccion") or "Sin dirección"
+        return f"{name} · {direction} · {email}"
 
-    selected = st.selectbox(
-        "Responsable individual",
-        option_ids,
-        index=option_ids.index(current_id) if current_id in option_ids else 0,
+    selected_ids = st.multiselect(
+        "Personas responsables",
+        options=list(by_id.keys()),
+        default=current_ids,
         format_func=_label,
         key=key,
-        help="Esta persona recibirá el recordatorio automático cuando falten 3 días para la fecha compromiso.",
+        help=(
+            f"Sólo aparecen usuarios activos con acceso a {required_module}. "
+            "Cada persona seleccionada recibirá su propio recordatorio por correo."
+        ),
     )
-    row = by_id.get(selected)
-    if row:
-        return {
+
+    selected = []
+    for user_id in selected_ids:
+        row = by_id[user_id]
+        selected.append({
             "id": row.get("id"),
             "nombre": row.get("nombre") or row.get("email"),
             "email": row.get("email"),
-        }
-    return {"id": None, "nombre": None, "email": None}
+            "direccion": row.get("direccion"),
+        })
+    return selected
 
 
-def _notification_status_caption(deadline, responsible_email, enabled, status):
+def _notification_status_caption(deadline, responsibles, enabled, status):
     if status == "Terminada":
         return "El acuerdo está terminado; no se enviarán recordatorios."
     if not enabled:
         return "Recordatorio por correo desactivado."
     if not deadline:
         return "Falta definir la fecha compromiso para programar el aviso."
-    if not responsible_email:
-        return "Falta asignar un responsable individual con correo."
+    if not responsibles:
+        return "Falta asignar al menos una persona responsable con correo."
     try:
         days = (deadline - date.today()).days
     except Exception:
-        return "Recordatorio configurado para 3 días antes del vencimiento."
+        days = None
+
+    recipients = len(responsibles)
+    suffix = f" · {recipients} destinatario(s)"
+    if days is None:
+        return "Recordatorio configurado para 3 días antes del vencimiento" + suffix
     if days > 3:
-        return f"Correo programado para 3 días antes del vencimiento · faltan {days} días."
+        return f"Correo programado para 3 días antes del vencimiento · faltan {days} días" + suffix
     if days == 3:
-        return "El correo corresponde enviarse hoy."
+        return "El correo corresponde enviarse hoy" + suffix
     if 0 <= days < 3:
-        return f"Faltan {days} día(s). El aviso de 3 días ya debió generarse."
-    return "La fecha compromiso ya venció."
+        return f"Faltan {days} día(s). El aviso de 3 días ya debió generarse" + suffix
+    return "La fecha compromiso ya venció" + suffix
+
+
+def _drive_video_preview_url(url: str) -> str | None:
+    url = str(url or "").strip()
+    patterns = [
+        r"drive\.google\.com/file/d/([^/]+)",
+        r"drive\.google\.com/open\?id=([^&]+)",
+        r"drive\.google\.com/uc\?.*?[?&]id=([^&]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url, re.I)
+        if match:
+            return f"https://drive.google.com/file/d/{match.group(1)}/preview"
+    return None
+
+
+def _preview_recording_url(url: str, key: str):
+    url = str(url or "").strip()
+    if not url:
+        return
+
+    st.markdown("#### Previsualización de la videograbación")
+    drive_preview = _drive_video_preview_url(url)
+
+    try:
+        if drive_preview:
+            components.iframe(drive_preview, height=520, scrolling=False)
+        elif re.search(r"(youtube\.com|youtu\.be|vimeo\.com)", url, re.I):
+            st.video(url)
+        elif re.search(r"\.(mp4|webm|mov)(?:\?|$)", url, re.I):
+            st.video(url)
+        else:
+            st.info(
+                "El proveedor de esta URL puede impedir la reproducción embebida. "
+                "Puedes intentar abrirla directamente."
+            )
+        st.link_button(
+            "Abrir videograbación en una pestaña nueva",
+            url,
+            use_container_width=True,
+        )
+    except Exception:
+        st.warning("No fue posible previsualizar esta URL dentro de la app.")
+        st.link_button(
+            "Abrir videograbación",
+            url,
+            use_container_width=True,
+        )
+
 
 def board_session_detail(session: dict):
     year = st.session_state.board_year
@@ -1755,6 +1849,9 @@ def board_session_detail(session: dict):
         client.table("sesiones_junta").update({"videograbacion_url": video_url.strip() or None}).eq("id", session["id"]).execute()
         st.session_state.board_session["videograbacion_url"] = video_url.strip() or None
         st.success("URL de la videograbación guardada.")
+    if video_url.strip():
+        with media3.expander("Previsualizar videograbación", expanded=False):
+            _preview_recording_url(video_url.strip(), f"board_recording_{session['id']}")
     if uploaded:
         with media1.expander("Previsualizar convocatoria"):
             if not _document_preview(uploaded.getvalue(), uploaded.name, 480):
@@ -1862,18 +1959,17 @@ def board_session_detail(session: dict):
             display_statuses = {"Por iniciar": "Por iniciar", "En proceso": "En progreso", "Terminada": "Terminada"}
             new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
             new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
-            responsible = {"id": None, "nombre": None, "email": None}
+            responsibles = []
             notify_email = False
             if not is_report:
-                st.markdown("##### Responsable y notificación")
-                nr1, nr2 = st.columns([2, 1])
+                st.markdown("##### Responsables y notificación")
+                nr1, nr2 = st.columns([3, 1])
                 with nr1:
-                    responsible = _responsible_selector(
+                    responsibles = _responsibles_selector(
                         client,
-                        current_user_id=row.get("responsable_usuario_id"),
-                        current_email=row.get("responsable_email"),
-                        current_name=row.get("responsable_nombre"),
-                        key=f"board_responsible_{row['id']}",
+                        required_module=MODULE_BOARD,
+                        current_responsibles=_legacy_responsibles_from_row(row),
+                        key=f"board_responsibles_{row['id']}",
                     )
                 with nr2:
                     notify_email = st.checkbox(
@@ -1884,7 +1980,7 @@ def board_session_detail(session: dict):
                 st.caption(
                     _notification_status_caption(
                         new_date,
-                        responsible.get("email"),
+                        responsibles,
                         notify_email,
                         new_status,
                     )
@@ -1909,15 +2005,19 @@ def board_session_detail(session: dict):
                     "fecha_compromiso": new_date.isoformat() if new_date else None,
                     "fecha_cierre": close_date,
                     "cumplimiento": compliance,
-                    "responsable_usuario_id": responsible.get("id"),
-                    "responsable_nombre": responsible.get("nombre"),
-                    "responsable_email": responsible.get("email"),
+                    "responsables_notificacion": responsibles,
+                    "responsable_usuario_id": responsibles[0].get("id") if responsibles else None,
+                    "responsable_nombre": responsibles[0].get("nombre") if responsibles else None,
+                    "responsable_email": responsibles[0].get("email") if responsibles else None,
                     "notificar_email": bool(notify_email),
                     "updated_at": datetime.now().isoformat(),
                 }).eq("id", row["id"]).execute()
                 description = f"Estatus: {display_statuses[new_status]}; responsables: {', '.join(new_areas) or 'sin responsable'}; fecha compromiso: {new_date.isoformat() if new_date else 'sin fecha'}"
-                if responsible.get("email"):
-                    description += f"; responsable individual: {responsible.get('nombre') or responsible.get('email')} ({responsible.get('email')})"
+                if responsibles:
+                    description += "; personas responsables: " + ", ".join(
+                        f"{item.get('nombre') or item.get('email')} ({item.get('email')})"
+                        for item in responsibles
+                    )
                 description += f"; aviso por correo: {'sí' if notify_email else 'no'}"
                 if compliance: description += f"; cumplimiento: {compliance}"
                 client.table("historial_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
@@ -2257,15 +2357,14 @@ def committee_session_detail(session: dict, client):
                                         key=f"committee_result_{item['id']}")
             current_date = date.fromisoformat(str(item["fecha_compromiso"])[:10]) if item.get("fecha_compromiso") else None
             deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}")
-            st.markdown("##### Responsable y notificación")
-            nr1, nr2 = st.columns([2, 1])
+            st.markdown("##### Responsables y notificación")
+            nr1, nr2 = st.columns([3, 1])
             with nr1:
-                responsible = _responsible_selector(
+                responsibles = _responsibles_selector(
                     client,
-                    current_user_id=item.get("responsable_usuario_id"),
-                    current_email=item.get("responsable_email"),
-                    current_name=item.get("responsable_nombre"),
-                    key=f"committee_responsible_{item['id']}",
+                    required_module=MODULE_COMMITTEES,
+                    current_responsibles=_legacy_responsibles_from_row(item),
+                    key=f"committee_responsibles_{item['id']}",
                 )
             with nr2:
                 notify_email = st.checkbox(
@@ -2276,7 +2375,7 @@ def committee_session_detail(session: dict, client):
             st.caption(
                 _notification_status_caption(
                     deadline,
-                    responsible.get("email"),
+                    responsibles,
                     notify_email,
                     status_value,
                 )
@@ -2332,9 +2431,10 @@ def committee_session_detail(session: dict, client):
                     "resultado": result_value,
                     "fecha_compromiso": deadline.isoformat() if deadline else None,
                     "comentario_seguimiento": comment.strip() or None,
-                    "responsable_usuario_id": responsible.get("id"),
-                    "responsable_nombre": responsible.get("nombre"),
-                    "responsable_email": responsible.get("email"),
+                    "responsables_notificacion": responsibles,
+                    "responsable_usuario_id": responsibles[0].get("id") if responsibles else None,
+                    "responsable_nombre": responsibles[0].get("nombre") if responsibles else None,
+                    "responsable_email": responsibles[0].get("email") if responsibles else None,
                     "notificar_email": bool(notify_email),
                     "actualizado_por": st.session_state.user["id"],
                 }).eq("id", item["id"]).execute()
@@ -3032,13 +3132,12 @@ def official_letters_month(year: int, month: int, month_name: str):
             .eq("anio", year).eq("mes", month)
             .order("fila_origen").order("created_at").execute().data or [])
 
-    unique_recipients = len({str(row.get("destinatario") or "").strip().casefold() for row in rows if str(row.get("destinatario") or "").strip()})
-    unique_requesters = len({str(row.get("solicitado_por") or "").strip().casefold() for row in rows if str(row.get("solicitado_por") or "").strip()})
+    signed_count = sum(bool(row.get("ruta_storage") or row.get("drive_url")) for row in rows)
     metrics_html = (
         '<div class="metric-grid">'
         f'<div class="metric-box metric-blue"><div class="metric-label">Oficios registrados</div><div class="metric-value">{len(rows)}</div></div>'
-        f'<div class="metric-box metric-green"><div class="metric-label">Destinatarios únicos</div><div class="metric-value">{unique_recipients}</div></div>'
-        f'<div class="metric-box metric-orange"><div class="metric-label">Solicitantes únicos</div><div class="metric-value">{unique_requesters}</div></div>'
+        f'<div class="metric-box metric-green"><div class="metric-label">Con firmado cargado</div><div class="metric-value">{signed_count}</div></div>'
+        f'<div class="metric-box metric-orange"><div class="metric-label">Pendientes de firmado</div><div class="metric-value">{max(0, len(rows)-signed_count)}</div></div>'
         f'<div class="metric-box metric-purple"><div class="metric-label">Mes</div><div class="metric-value">{month_name}</div></div>'
         '</div>'
     )
@@ -3138,154 +3237,6 @@ def _back_official_months():
     st.session_state.pop("official_month", None)
     st.session_state.pop("official_list_mode", None)
 
-
-def _normalize_analytics_text(value) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return ""
-    import unicodedata
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("utf-8")
-    return re.sub(r"\s+", " ", text)
-
-
-def _categorize_official_request(value) -> str:
-    """Clasificación gerencial automática a partir del asunto del oficio."""
-    text = _normalize_analytics_text(value)
-    if not text:
-        return "Sin especificar"
-    rules = [
-        ("Información / documentación", ["informacion", "documentacion", "datos", "informe", "reporte", "expediente", "evidencia"]),
-        ("Firma / formalización", ["firma", "suscripcion", "formalizacion", "firmar"]),
-        ("Validación / autorización", ["validacion", "validar", "visto bueno", "autorizacion", "autorizar", "aprobacion"]),
-        ("Seguimiento / atención", ["seguimiento", "atencion", "avance", "cumplimiento", "respuesta"]),
-        ("Pago / recursos", ["pago", "ministracion", "recurso", "deposito", "transferencia", "factura", "comprobacion"]),
-        ("Invitación / convocatoria", ["invitacion", "convocatoria", "asistencia", "participacion", "evento"]),
-        ("Designación / nombramiento", ["designacion", "nombramiento", "representante", "enlace", "comision"]),
-        ("Opinión / revisión", ["opinion", "revision", "comentarios", "observaciones", "analisis"]),
-        ("Convenio / instrumento jurídico", ["convenio", "contrato", "instrumento", "anexo", "acuerdo"]),
-    ]
-    for category, keywords in rules:
-        if any(keyword in text for keyword in keywords):
-            return category
-    return "Otro"
-
-
-def official_letters_analytics(year: int, client) -> None:
-    try:
-        rows = client.table("oficios_direccion_general").select(
-            "mes,destinatario,solicitado_por,asunto"
-        ).eq("anio", year).execute().data or []
-    except Exception as exc:
-        st.error(f"No fue posible cargar la analítica de oficios: {exc}")
-        return
-
-    if not rows:
-        st.info(f"No hay oficios registrados para {year}.")
-        return
-
-    df = pd.DataFrame(rows)
-    df["mes"] = pd.to_numeric(df.get("mes"), errors="coerce").fillna(0).astype(int)
-    month_lookup = dict(MONTHS_ES)
-    month_order = [name for _, name in MONTHS_ES]
-
-    monthly = (
-        df[df["mes"].between(1, 12)]
-        .groupby("mes").size().reindex(range(1, 13), fill_value=0)
-        .rename("Oficios").reset_index()
-    )
-    monthly["Mes"] = monthly["mes"].map(month_lookup)
-
-    total = int(len(df))
-    active_months = max(1, int((monthly["Oficios"] > 0).sum()))
-    avg = total / active_months
-    peak_row = monthly.loc[monthly["Oficios"].idxmax()]
-    recipients_unique = int(df["destinatario"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
-
-    metric_cards = (
-        '<div class="metric-grid">'
-        f'<div class="metric-box metric-blue"><div class="metric-label">Oficios del año</div><div class="metric-value">{total}</div></div>'
-        f'<div class="metric-box metric-green"><div class="metric-label">Promedio mensual activo</div><div class="metric-value">{avg:.1f}</div></div>'
-        f'<div class="metric-box metric-orange"><div class="metric-label">Mes con mayor actividad</div><div class="metric-value" style="font-size:1.45rem">{html.escape(str(peak_row["Mes"]))} · {int(peak_row["Oficios"])}</div></div>'
-        f'<div class="metric-box metric-purple"><div class="metric-label">Destinatarios únicos</div><div class="metric-value">{recipients_unique}</div></div>'
-        '</div>'
-    )
-    st.markdown(metric_cards, unsafe_allow_html=True)
-
-    st.markdown("### Actividad mensual")
-    st.caption("Número total de oficios emitidos por mes.")
-    month_chart = (
-        alt.Chart(monthly)
-        .mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7, size=48)
-        .encode(
-            x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-            color=alt.Color("Mes:N", sort=month_order,
-                            scale=alt.Scale(domain=month_order,
-                                            range=["#0798cf", "#009b4c", "#16ad8f", "#a990c7", "#f68b08", "#858e93"] * 2),
-                            legend=None),
-            tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
-        )
-    )
-    month_labels = alt.Chart(monthly).mark_text(dy=-11, fontSize=14, fontWeight="bold", color="#35434b").encode(
-        x=alt.X("Mes:N", sort=month_order), y="Oficios:Q", text=alt.Text("Oficios:Q", format=".0f")
-    )
-    st.altair_chart((month_chart + month_labels).properties(height=390), use_container_width=True)
-
-    left, right = st.columns(2, gap="large")
-
-    def _top_counts(column: str, label: str, top_n: int = 12) -> pd.DataFrame:
-        values = df[column].fillna("").astype(str).str.strip()
-        values = values.where(values.ne(""), "Sin dato")
-        counts = values.value_counts().head(top_n).rename_axis(label).reset_index(name="Oficios")
-        return counts.sort_values("Oficios", ascending=True)
-
-    with left:
-        st.markdown("### Principales destinatarios")
-        st.caption("Personas que concentran el mayor número de oficios recibidos.")
-        recipient_df = _top_counts("destinatario", "Destinatario")
-        recipient_chart = alt.Chart(recipient_df).mark_bar(cornerRadiusEnd=7).encode(
-            x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-            y=alt.Y("Destinatario:N", sort=None, title=None, axis=alt.Axis(labelLimit=280)),
-            color=alt.value("#5b55b8"),
-            tooltip=[alt.Tooltip("Destinatario:N"), alt.Tooltip("Oficios:Q", format=".0f")],
-        )
-        recipient_labels = alt.Chart(recipient_df).mark_text(dx=8, align="left", fontWeight="bold", color="#35434b").encode(
-            x="Oficios:Q", y=alt.Y("Destinatario:N", sort=None), text=alt.Text("Oficios:Q", format=".0f")
-        )
-        st.altair_chart((recipient_chart + recipient_labels).properties(height=430), use_container_width=True)
-
-    with right:
-        st.markdown("### Solicitado por")
-        st.caption("Áreas o personas que más solicitan la emisión de oficios.")
-        requester_df = _top_counts("solicitado_por", "Solicitado por")
-        requester_chart = alt.Chart(requester_df).mark_bar(cornerRadiusEnd=7).encode(
-            x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-            y=alt.Y("Solicitado por:N", sort=None, title=None, axis=alt.Axis(labelLimit=280)),
-            color=alt.value("#16ad8f"),
-            tooltip=[alt.Tooltip("Solicitado por:N"), alt.Tooltip("Oficios:Q", format=".0f")],
-        )
-        requester_labels = alt.Chart(requester_df).mark_text(dx=8, align="left", fontWeight="bold", color="#35434b").encode(
-            x="Oficios:Q", y=alt.Y("Solicitado por:N", sort=None), text=alt.Text("Oficios:Q", format=".0f")
-        )
-        st.altair_chart((requester_chart + requester_labels).properties(height=430), use_container_width=True)
-
-    st.markdown("### Tipo de solicitud · clasificación automática")
-    st.caption("Los asuntos se agrupan automáticamente por palabras clave para facilitar una lectura gerencial.")
-    df["Tipo de solicitud"] = df["asunto"].apply(_categorize_official_request)
-    category_df = df["Tipo de solicitud"].value_counts().rename_axis("Tipo de solicitud").reset_index(name="Oficios")
-    category_df = category_df.sort_values("Oficios", ascending=True)
-    category_chart = alt.Chart(category_df).mark_bar(cornerRadiusEnd=7).encode(
-        x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-        y=alt.Y("Tipo de solicitud:N", sort=None, title=None, axis=alt.Axis(labelLimit=320)),
-        color=alt.Color("Tipo de solicitud:N", legend=None,
-                        scale=alt.Scale(range=["#0798cf", "#009b4c", "#16ad8f", "#a990c7", "#f68b08", "#858e93"])),
-        tooltip=[alt.Tooltip("Tipo de solicitud:N"), alt.Tooltip("Oficios:Q", format=".0f")],
-    )
-    category_labels = alt.Chart(category_df).mark_text(dx=8, align="left", fontWeight="bold", color="#35434b").encode(
-        x="Oficios:Q", y=alt.Y("Tipo de solicitud:N", sort=None), text=alt.Text("Oficios:Q", format=".0f")
-    )
-    st.altair_chart((category_chart + category_labels).properties(height=390), use_container_width=True)
-
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
     top1.button(
@@ -3295,47 +3246,35 @@ def official_letters_year(year: int):
         on_click=_back_official_years,
     )
     top2.markdown(f"## Oficios Dirección General · {year}")
-
+    st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
-    months_tab, analytics_tab = st.tabs(["Meses", "Analítica"])
-
-    with months_tab:
-        st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
-        counts = {month: 0 for month, _ in MONTHS_ES}
-        if client:
-            try:
-                rows = client.table("oficios_direccion_general").select("mes").eq("anio", year).execute().data or []
-                for row in rows:
-                    month_value = int(row.get("mes") or 0)
-                    if month_value in counts:
-                        counts[month_value] += 1
-            except Exception:
-                pass
-        colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
-        for start in range(0, 12, 3):
-            columns = st.columns(3, gap="large")
-            for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
-                color = colors[(start + offset) % len(colors)]
-                count = counts.get(month, 0)
-                with columns[offset]:
-                    st.markdown(
-                        f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{count} oficio(s)</p></div>',
-                        unsafe_allow_html=True,
-                    )
-                    st.button(
-                        f"Abrir {month_name}",
-                        key=f"official_month_{year}_{month}",
-                        use_container_width=True,
-                        type="primary",
-                        on_click=_go_official_month,
-                        args=(month,),
-                    )
-
-    with analytics_tab:
-        if client:
-            official_letters_analytics(year, client)
-        else:
-            st.error("Primero debes conectar Supabase para consultar la analítica.")
+    counts = {month: {"total": 0, "signed": 0} for month, _ in MONTHS_ES}
+    if client:
+        try:
+            rows = client.table("oficios_direccion_general").select("mes,ruta_storage,drive_url").eq("anio", year).execute().data or []
+            for row in rows:
+                month_value = int(row.get("mes") or 0)
+                if month_value in counts:
+                    counts[month_value]["total"] += 1
+                    counts[month_value]["signed"] += int(bool(row.get("ruta_storage") or row.get("drive_url")))
+        except Exception:
+            pass
+    colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
+    for start in range(0, 12, 3):
+        columns = st.columns(3, gap="large")
+        for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
+            color = colors[(start + offset) % len(colors)]
+            count = counts.get(month, {"total": 0, "signed": 0})
+            with columns[offset]:
+                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{count["total"]} oficio(s) · {count["signed"]} firmado(s)</p></div>', unsafe_allow_html=True)
+                st.button(
+                    f"Abrir {month_name}",
+                    key=f"official_month_{year}_{month}",
+                    use_container_width=True,
+                    type="primary",
+                    on_click=_go_official_month,
+                    args=(month,),
+                )
 
 
 def official_letters():
