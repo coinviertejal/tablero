@@ -4019,12 +4019,14 @@ def _official_group_counts(rows: list[dict], field: str, empty_label: str) -> pd
 st.markdown("""
 <style>
 /* --- Analítica Oficios: integración visual con fondo general --- */
-div[data-testid="stAltairChart"] {
-    background: transparent !important;
+div[data-testid="stAltairChart"],
+div[data-testid="stVegaLiteChart"] {
+    background: #f4f7f8 !important;
 }
 
-div[data-testid="stAltairChart"] > div {
-    background: transparent !important;
+div[data-testid="stAltairChart"] > div,
+div[data-testid="stVegaLiteChart"] > div {
+    background: #f4f7f8 !important;
 }
 
 /* Fuerza que el contenedor del tablero no parezca una "hoja blanca pegada". */
@@ -4069,12 +4071,19 @@ div[data-testid="stAltairChart"] > div {
 
 
 def _transparent_altair(chart):
-    """Integra los gráficos con el fondo gris de Streamlit."""
+    """Integra los gráficos con el fondo general de Streamlit."""
     try:
         return (
             chart
-            .configure(background="transparent")
-            .configure_view(strokeWidth=0, fill="transparent")
+            .configure(background="#f4f7f8")
+            .configure_view(strokeWidth=0, fill="#f4f7f8")
+            .configure_axis(
+                gridColor="#dde5e8",
+                domainColor="#cfd8dc",
+                tickColor="#cfd8dc",
+                labelColor="#66747b",
+                titleColor="#66747b",
+            )
         )
     except Exception:
         return chart
@@ -4152,6 +4161,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             "Haz clic en cualquier barra para usarla como filtro de las demás gráficas. "
             "Puedes combinar filtros; haz doble clic sobre una selección para limpiarla."
         )
+        st.markdown("#### Oficios por mes" if not cancelled_mode else "#### Cancelados por mes")
 
         # Todas las visualizaciones comparten un mismo conjunto de datos y selecciones.
         # Esto permite que Mes, Destinatario, Dependencia, Solicitado por y Tema
@@ -4214,8 +4224,17 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             month_bars = (
                 month_base.mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
                 .encode(
-                    x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
-                    y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    x=alt.X(
+                        "Mes:N",
+                        sort=month_order,
+                        title=None,
+                        axis=alt.Axis(labelAngle=0, labelPadding=6),
+                    ),
+                    y=alt.Y(
+                        "Oficios:Q",
+                        title=None,
+                        axis=alt.Axis(tickMinStep=1, labelPadding=4),
+                    ),
                     color=alt.condition(
                         month_sel | month_hover,
                         alt.Color("Mes:N", sort=month_order, legend=None),
@@ -4231,9 +4250,11 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 y="Oficios:Q",
                 text=alt.Text("Oficios:Q", format=".0f"),
             )
-            month_chart = (month_bars + month_labels).properties(
+            month_chart = (
+                month_bars + month_labels
+            ).properties(
                 height=300,
-                title=alt.TitleParams("Oficios por mes", anchor="start", fontSize=18, fontWeight="bold"),
+                padding={"left": 0, "right": 8, "top": 4, "bottom": 0},
             )
 
             def horizontal_chart(field, domain, selection, hover, title, color, filters):
@@ -4284,12 +4305,15 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 "#f68b08", [month_sel, rec_sel, dep_sel, req_sel],
             )
 
-            dashboard = alt.vconcat(
-                month_chart,
-                alt.hconcat(recipient_chart, dependency_chart).resolve_scale(x="independent"),
-                alt.hconcat(requester_chart, theme_chart).resolve_scale(x="independent"),
-                spacing=28,
-            ).configure_view(stroke=None)
+            dashboard = (
+                alt.vconcat(
+                    month_chart,
+                    alt.hconcat(recipient_chart, dependency_chart).resolve_scale(x="independent"),
+                    alt.hconcat(requester_chart, theme_chart).resolve_scale(x="independent"),
+                    spacing=28,
+                )
+                .properties(padding={"left": 0, "right": 0, "top": 0, "bottom": 0})
+            )
 
             st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
 
