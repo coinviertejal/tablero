@@ -2898,7 +2898,69 @@ def _import_drive_links(client, uploaded) -> dict:
             if exact_global:
                 candidates = exact_global
 
-        # 4) Fallback por consecutivo + mes + año si el formato difiere.
+        # 4) Fallback por folio + año. Esto rescata archivos cuyo nombre
+        #    tiene errores de formato, mes incompleto o variantes DGE/DGI.
+        if len(candidates) != 1 and record.get("folio_normalizado"):
+            year_hint = None
+            month_hint = None
+            type_hint = None
+
+            raw_num = str(record.get("numero_oficio") or "")
+            raw_name = str(record.get("nombre_archivo") or "")
+            combined = (raw_num + " " + raw_name).upper()
+
+            ym = re.search(r"(20\d{2})", combined)
+            if ym:
+                year_hint = ym.group(1)
+
+            mm = re.search(r"(?:-|/|\.)(0[1-9]|1[0-2])(?:-|/|\.|\s)*(?:20\d{2}|$)", combined)
+            if mm:
+                month_hint = mm.group(1)
+            else:
+                mm2 = re.search(r"(0[1-9]|1[0-2])\s*20\d{2}", combined)
+                if mm2:
+                    month_hint = mm2.group(1)
+
+            if re.search(r"\b(?:DG[\s._/-]*I|DGI)\b", combined):
+                type_hint = "I"
+            elif re.search(r"\b(?:DG[\s._/-]*E|DGE)\b", combined):
+                type_hint = "E"
+
+            same_folio = folio_index.get(record["folio_normalizado"], [])
+            narrowed = same_folio
+
+            if year_hint:
+                by_year = [
+                    row for row in narrowed
+                    if year_hint in str(row.get("numero_oficio") or "")
+                ]
+                if by_year:
+                    narrowed = by_year
+
+            if month_hint and len(narrowed) > 1:
+                by_month = []
+                for row in narrowed:
+                    norm = _normalize_office_link_key(row.get("numero_oficio"))
+                    if re.search(rf"\D{re.escape(month_hint)}\D+20\d{{2}}$", norm):
+                        by_month.append(row)
+                if by_month:
+                    narrowed = by_month
+
+            if type_hint and len(narrowed) > 1:
+                by_type = []
+                for row in narrowed:
+                    norm = _normalize_office_link_key(row.get("numero_oficio"))
+                    if type_hint == "I" and "DG/I" in norm:
+                        by_type.append(row)
+                    elif type_hint == "E" and "DG/E" in norm:
+                        by_type.append(row)
+                if by_type:
+                    narrowed = by_type
+
+            if len(narrowed) == 1:
+                candidates = narrowed
+
+        # 5) Fallback por consecutivo + mes + año si el formato difiere.
         if len(candidates) != 1 and record.get("numero_normalizado"):
             m = re.search(r"(\d{1,3}(?:-BIS)?)\D+(\d{2})\D+(20\d{2})$", record["numero_normalizado"])
             if m:
