@@ -4188,8 +4188,9 @@ def _official_letters_analytics(year: int, rows: list[dict]):
 
         st.markdown("### Tablero interactivo de oficios" if not cancelled_mode else "### Tablero interactivo de cancelados")
         st.caption(
-            "Haz clic en cualquier barra para usarla como filtro de las demás gráficas. "
-            "Puedes combinar filtros; haz doble clic sobre una selección para limpiarla."
+            "Haz clic en una barra para seleccionar un valor de esa dimensión. "
+            "Puedes combinar Mes + Destinatario + Dependencia + Solicitado por + Tema. "
+            "Un nuevo clic sustituye la selección de esa dimensión; doble clic la limpia."
         )
         st.markdown("#### Oficios por mes" if not cancelled_mode else "#### Cancelados por mes")
 
@@ -4202,11 +4203,13 @@ def _official_letters_analytics(year: int, rows: list[dict]):
 
         dashboard_df = pd.DataFrame([
             {
+                "OficioID": _office_unique_key(row),
                 "Mes": month_names.get(int(row.get("mes") or 0), "Sin mes"),
-                "Destinatario": str(row.get("destinatario") or "Sin destinatario").strip() or "Sin destinatario",
-                "Dependencia": str(row.get("dependencia") or "Sin dependencia").strip() or "Sin dependencia",
-                "Solicitado por": str(row.get("solicitado_por") or "Sin dato").strip() or "Sin dato",
-                "Tema": str(row.get("tema") or "Otros / por clasificar").strip() or "Otros / por clasificar",
+                "MesOrden": int(row.get("mes") or 0),
+                "Destinatario": re.sub(r"\\s+", " ", str(row.get("destinatario") or "Sin destinatario").strip()) or "Sin destinatario",
+                "Dependencia": re.sub(r"\\s+", " ", str(row.get("dependencia") or "Sin dependencia").strip()) or "Sin dependencia",
+                "Solicitado por": re.sub(r"\\s+", " ", str(row.get("solicitado_por") or "Sin dato").strip()) or "Sin dato",
+                "Tema": re.sub(r"\\s+", " ", str(row.get("tema") or "Otros / por clasificar").strip()) or "Otros / por clasificar",
             }
             for row in dashboard_rows
         ])
@@ -4214,26 +4217,12 @@ def _official_letters_analytics(year: int, rows: list[dict]):
         if dashboard_df.empty:
             st.info("No hay información suficiente para generar el tablero interactivo.")
         else:
-            # Dominios top para evitar gráficas ilegibles, manteniendo el filtrado sobre datos fila a fila.
-            top_recipients = (
-                dashboard_df.groupby("Destinatario").size().sort_values(ascending=False).head(12).index.tolist()
-            )
-            top_dependencies = (
-                dashboard_df.groupby("Dependencia").size().sort_values(ascending=False).head(12).index.tolist()
-            )
-            top_requesters = (
-                dashboard_df.groupby("Solicitado por").size().sort_values(ascending=False).head(12).index.tolist()
-            )
-            top_themes = (
-                dashboard_df.groupby("Tema").size().sort_values(ascending=False).head(12).index.tolist()
-            )
-
             # Selecciones persistentes por clic y resaltado por hover.
-            month_sel = alt.selection_point(fields=["Mes"], on="click", clear="dblclick", empty=True, name="mes_sel")
-            rec_sel = alt.selection_point(fields=["Destinatario"], on="click", clear="dblclick", empty=True, name="dest_sel")
-            dep_sel = alt.selection_point(fields=["Dependencia"], on="click", clear="dblclick", empty=True, name="dep_sel")
-            req_sel = alt.selection_point(fields=["Solicitado por"], on="click", clear="dblclick", empty=True, name="req_sel")
-            theme_sel = alt.selection_point(fields=["Tema"], on="click", clear="dblclick", empty=True, name="tema_sel")
+            month_sel = alt.selection_point(fields=["Mes"], on="click", clear="dblclick", empty=True, toggle=False, name="mes_sel")
+            rec_sel = alt.selection_point(fields=["Destinatario"], on="click", clear="dblclick", empty=True, toggle=False, name="dest_sel")
+            dep_sel = alt.selection_point(fields=["Dependencia"], on="click", clear="dblclick", empty=True, toggle=False, name="dep_sel")
+            req_sel = alt.selection_point(fields=["Solicitado por"], on="click", clear="dblclick", empty=True, toggle=False, name="req_sel")
+            theme_sel = alt.selection_point(fields=["Tema"], on="click", clear="dblclick", empty=True, toggle=False, name="tema_sel")
 
             month_hover = alt.selection_point(fields=["Mes"], on="pointerover", clear="pointerout", empty=False, name="mes_hover")
             rec_hover = alt.selection_point(fields=["Destinatario"], on="pointerover", clear="pointerout", empty=False, name="dest_hover")
@@ -4249,7 +4238,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 .transform_filter(dep_sel)
                 .transform_filter(req_sel)
                 .transform_filter(theme_sel)
-                .transform_aggregate(Oficios="count()", groupby=["Mes"])
+                .transform_aggregate(Oficios="distinct(OficioID)", groupby=["Mes"])
             )
             month_bars = (
                 month_base.mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
@@ -4287,28 +4276,54 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 width=644,
             )
 
-            def horizontal_chart(field, domain, selection, hover, title, color, filters):
+            def horizontal_chart(field, selection, hover, title, color, filters, max_items=12):
                 chart = base
                 for f in filters:
                     chart = chart.transform_filter(f)
+
+                # Primero se aplican los filtros cruzados; después se agrupa
+                # y recién entonces se calcula el top dentro del universo filtrado.
                 chart = (
                     chart
-                    .transform_filter(alt.FieldOneOfPredicate(field=field, oneOf=domain))
-                    .transform_aggregate(Oficios="count()", groupby=[field])
+                    .transform_aggregate(Oficios="distinct(OficioID)", groupby=[field])
+                    .transform_window(
+                        rank="rank()",
+                        sort=[alt.SortField("Oficios", order="descending")],
+                    )
+                    .transform_filter(f"datum.rank <= {int(max_items)}")
                 )
+
                 bars = (
                     chart.mark_bar(cornerRadiusEnd=8)
                     .encode(
-                        y=alt.Y(f"{field}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=210)),
+                        y=alt.Y(
+                            f"{field}:N",
+                            sort=alt.SortField("Oficios", order="descending"),
+                            title=None,
+                            axis=alt.Axis(labelLimit=210),
+                        ),
                         x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
                         color=alt.condition(selection | hover, alt.value(color), alt.value("#c7cdd2")),
                         opacity=alt.condition(selection | hover, alt.value(1), alt.value(0.78)),
-                        tooltip=[alt.Tooltip(f"{field}:N", title=field), alt.Tooltip("Oficios:Q", format=".0f")],
+                        tooltip=[
+                            alt.Tooltip(f"{field}:N", title=field),
+                            alt.Tooltip("Oficios:Q", format=".0f"),
+                        ],
                     )
                     .add_params(selection, hover)
                 )
-                labels = chart.mark_text(align="left", baseline="middle", dx=5, fontSize=11, fontWeight="bold", color="#35434b").encode(
-                    y=alt.Y(f"{field}:N", sort="-x"),
+                labels = chart.mark_text(
+                    align="left",
+                    baseline="middle",
+                    dx=5,
+                    fontSize=11,
+                    fontWeight="bold",
+                    color="#35434b",
+                ).encode(
+                    y=alt.Y(
+                        f"{field}:N",
+                        sort=alt.SortField("Oficios", order="descending"),
+                    ),
                     x="Oficios:Q",
                     text=alt.Text("Oficios:Q", format=".0f"),
                 )
@@ -4318,24 +4333,48 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     title=alt.TitleParams(title, anchor="start", fontSize=16, fontWeight="bold"),
                 )
 
+            # Contador de control: permite comprobar que las selecciones estén bien.
+            filtered_count = (
+                base
+                .transform_filter(month_sel)
+                .transform_filter(rec_sel)
+                .transform_filter(dep_sel)
+                .transform_filter(req_sel)
+                .transform_filter(theme_sel)
+                .transform_aggregate(Oficios="distinct(OficioID)")
+                .transform_calculate(
+                    Etiqueta="'Universo filtrado: ' + datum.Oficios + ' oficio' + (datum.Oficios == 1 ? '' : 's')"
+                )
+                .mark_text(
+                    align="left",
+                    baseline="middle",
+                    fontSize=15,
+                    fontWeight="bold",
+                    color="#35434b",
+                )
+                .encode(text="Etiqueta:N")
+                .properties(height=34, width=644)
+            )
+
             recipient_chart = horizontal_chart(
-                "Destinatario", top_recipients, rec_sel, rec_hover, "Principales destinatarios",
+                "Destinatario", rec_sel, rec_hover, "Principales destinatarios · Top 12",
                 "#173b63", [month_sel, dep_sel, req_sel, theme_sel],
             )
             dependency_chart = horizontal_chart(
-                "Dependencia", top_dependencies, dep_sel, dep_hover, "Dependencias destinatarias",
+                "Dependencia", dep_sel, dep_hover, "Dependencias destinatarias · Top 12",
                 "#0a9b78", [month_sel, rec_sel, req_sel, theme_sel],
             )
             requester_chart = horizontal_chart(
-                "Solicitado por", top_requesters, req_sel, req_hover, "Solicitado por",
+                "Solicitado por", req_sel, req_hover, "Solicitado por · Top 12",
                 "#6750a4", [month_sel, rec_sel, dep_sel, theme_sel],
             )
             theme_chart = horizontal_chart(
-                "Tema", top_themes, theme_sel, theme_hover, "Temas",
+                "Tema", theme_sel, theme_hover, "Temas · Top 12",
                 "#f68b08", [month_sel, rec_sel, dep_sel, req_sel],
             )
 
             dashboard = alt.vconcat(
+                filtered_count,
                 month_chart,
                 alt.hconcat(
                     recipient_chart,
@@ -4347,7 +4386,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     theme_chart,
                     spacing=24,
                 ).resolve_scale(x="independent"),
-                spacing=28,
+                spacing=20,
             )
 
             st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
