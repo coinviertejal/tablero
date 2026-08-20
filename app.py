@@ -3717,7 +3717,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
         )
 
         metric_cards = [
-            ("Oficios no cancelados" if not cancelled_mode else "Total cancelados", total, "#0798cf" if not cancelled_mode else "#f68b08"),
+            ("Oficios enviados" if not cancelled_mode else "Total cancelados", total, "#0798cf" if not cancelled_mode else "#f68b08"),
             ("Promedio por mes activo", f"{avg:.1f}", "#009b4c"),
             ("Destinatarios únicos", unique_recipients, "#16ad8f"),
             ("Solicitantes únicos", unique_requesters, "#a990c7"),
@@ -3735,7 +3735,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
 
         st.markdown("### Oficios por mes" if not cancelled_mode else "### Cancelados por mes")
         st.caption(
-            "Total de oficios registrados en cada mes."
+            "Total de oficios enviados en cada mes."
             if not cancelled_mode
             else "Total de oficios cancelados registrados en cada mes."
         )
@@ -3891,7 +3891,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
     _render_analytics_block(
         active_rows,
         f"Analítica de Oficios · {year}",
-        "Volumen mensual, destinatarios y origen de las solicitudes no canceladas.",
+        "Volumen mensual, destinatarios y origen de los oficios enviados.",
         cancelled_mode=False,
     )
 
@@ -4111,8 +4111,8 @@ def official_letters():
                     .data or []
                 )
                 year_rows = _dedupe_office_rows(year_rows)
-                # La tarjeta anual muestra todos los oficios únicos registrados,
-                # incluyendo los cancelados. Los cancelados se analizan aparte.
+                # Oficios enviados = oficios únicos no cancelados.
+                year_rows = _official_active_rows(year_rows)
                 year_counts[year] = len(year_rows)
             except Exception:
                 year_counts[year] = 0
