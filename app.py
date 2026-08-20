@@ -4263,7 +4263,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     y=alt.Y(
                         "Oficios:Q",
                         title=None,
-                        axis=alt.Axis(tickMinStep=1, labelPadding=4),
+                        axis=alt.Axis(tickMinStep=1, labelPadding=2),
                     ),
                     color=alt.condition(
                         month_sel | month_hover,
@@ -4342,19 +4342,13 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     recipient_chart,
                     dependency_chart,
                     spacing=24,
-                    center=False,
-                    bounds="flush",
                 ).resolve_scale(x="independent"),
                 alt.hconcat(
                     requester_chart,
                     theme_chart,
                     spacing=24,
-                    center=False,
-                    bounds="flush",
                 ).resolve_scale(x="independent"),
                 spacing=28,
-                center=False,
-                bounds="flush",
             ).properties(background="#f4f7f8")
 
             st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
