@@ -2021,7 +2021,7 @@ def board_session_detail(session: dict):
             for offset, row in enumerate(approved_rows, len(existing) + 1):
                 payload.append({"sesion_id": session["id"], "numero": _agreement_code(session, offset), "tipo_registro": row.get("tipo_registro") or "Acuerdo",
                     "titulo": str(row["titulo"]).strip(), "texto": str(row.get("texto") or "").strip(), "areas": [],
-                    "estatus": "Por iniciar", "fecha_compromiso": None})
+                    "estatus": "Por iniciar", "fecha_compromiso": None, "notificar_email": True})
             if payload:
                 client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
     session_documents = client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"]).order("created_at").execute().data or []
@@ -2077,7 +2077,7 @@ def board_session_detail(session: dict):
                 with nr2:
                     notify_email = st.checkbox(
                         "Enviar recordatorio por correo",
-                        value=bool(row.get("notificar_email", True)),
+                        value=True if row.get("notificar_email") is None else bool(row.get("notificar_email")),
                         key=f"board_notify_email_{row['id']}_{widget_nonce}",
                     )
                 st.caption(
@@ -2193,7 +2193,7 @@ def board_session_detail(session: dict):
                 all_rows = client.table("acuerdos_junta").select("numero").eq("sesion_id", session["id"]).execute().data or []
                 client.table("acuerdos_junta").insert({"sesion_id": session["id"], "numero": _next_agreement_number(session, all_rows),
                     "tipo_registro": manual_type, "titulo": manual_title.strip(), "texto": manual_text.strip(), "areas": [],
-                    "estatus": "Por iniciar", "fecha_compromiso": None}).execute()
+                    "estatus": "Por iniciar", "fecha_compromiso": None, "notificar_email": True}).execute()
                 st.success("Acuerdo agregado."); st.rerun()
 
 
@@ -2417,7 +2417,7 @@ def committee_session_detail(session: dict, client):
                     "tipo_registro": row.get("tipo_registro") or "Informe",
                     "titulo": str(row.get("titulo") or "").strip(),
                     "texto": str(row.get("texto") or "").strip(), "areas": [],
-                    "estatus": "Por iniciar", "resultado": "Pendiente",
+                    "estatus": "Por iniciar", "resultado": "Pendiente", "notificar_email": True,
                 })
             if payload:
                 client.table("acuerdos_comite").insert(payload).execute()
@@ -2480,7 +2480,7 @@ def committee_session_detail(session: dict, client):
             with nr2:
                 notify_email = st.checkbox(
                     "Enviar recordatorio por correo",
-                    value=bool(item.get("notificar_email", True)),
+                    value=True if item.get("notificar_email") is None else bool(item.get("notificar_email")),
                     key=f"committee_notify_email_{item['id']}_{widget_nonce}",
                 )
             st.caption(
