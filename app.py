@@ -4100,7 +4100,7 @@ div[data-testid="stVegaLiteChart"] {
 """, unsafe_allow_html=True)
 
 def _transparent_altair(chart):
-    """Integra los gráficos con el fondo general de Streamlit."""
+    """Aplica estilo sólo al tablero final para compatibilidad con Altair 6."""
     try:
         return (
             chart
@@ -4284,7 +4284,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 month_bars + month_labels
             ).properties(
                 height=300,
-                background="#f4f7f8",
+                width=644,
             )
 
             def horizontal_chart(field, domain, selection, hover, title, color, filters):
@@ -4315,7 +4315,6 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 return (bars + labels).properties(
                     height=320,
                     width=310,
-                    background="#f4f7f8",
                     title=alt.TitleParams(title, anchor="start", fontSize=16, fontWeight="bold"),
                 )
 
@@ -4349,7 +4348,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     spacing=24,
                 ).resolve_scale(x="independent"),
                 spacing=28,
-            ).properties(background="#f4f7f8")
+            )
 
             st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
 
