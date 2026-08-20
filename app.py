@@ -4384,14 +4384,27 @@ def official_letters_year(year: int):
         try:
             rows = (
                 client.table("oficios_direccion_general")
-                .select("id,anio,mes,numero_oficio,folio_control,destinatario,cargo,dependencia,solicitado_por,asunto,drive_url,ruta_storage,status_control,firma,tema,subtema,clasificacion_confianza,clasificacion_fuente,clasificacion_manual")
+                .select("*")
                 .eq("anio", year)
                 .execute()
                 .data or []
             )
             rows = _dedupe_office_rows(rows)
-        except Exception:
-            rows = []
+        except Exception as exc:
+            # Nunca vaciar silenciosamente la vista por una columna opcional.
+            # Segundo intento con el núcleo histórico de la tabla.
+            try:
+                rows = (
+                    client.table("oficios_direccion_general")
+                    .select("id,anio,mes,numero_oficio,folio_control,destinatario,dependencia,solicitado_por,asunto,status_control,firma")
+                    .eq("anio", year)
+                    .execute()
+                    .data or []
+                )
+                rows = _dedupe_office_rows(rows)
+            except Exception:
+                rows = []
+                st.error(f"No fue posible cargar los oficios de {year}: {exc}")
 
     active_rows_year = _official_active_rows(rows)
 
