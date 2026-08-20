@@ -3135,13 +3135,24 @@ def official_letters_month(year: int, month: int, month_name: str):
             .eq("anio", year).eq("mes", month)
             .order("fila_origen").order("created_at").execute().data or [])
 
-    signed_count = sum(bool(row.get("ruta_storage") or row.get("drive_url")) for row in rows)
+    unique_recipients = len({
+        str(row.get("destinatario") or "").strip().casefold()
+        for row in rows if str(row.get("destinatario") or "").strip()
+    })
+    unique_dependencies = len({
+        str(row.get("dependencia") or "").strip().casefold()
+        for row in rows if str(row.get("dependencia") or "").strip()
+    })
+    unique_requesters = len({
+        str(row.get("solicitado_por") or "").strip().casefold()
+        for row in rows if str(row.get("solicitado_por") or "").strip()
+    })
     metrics_html = (
         '<div class="metric-grid">'
         f'<div class="metric-box metric-blue"><div class="metric-label">Oficios registrados</div><div class="metric-value">{len(rows)}</div></div>'
-        f'<div class="metric-box metric-green"><div class="metric-label">Con firmado cargado</div><div class="metric-value">{signed_count}</div></div>'
-        f'<div class="metric-box metric-orange"><div class="metric-label">Pendientes de firmado</div><div class="metric-value">{max(0, len(rows)-signed_count)}</div></div>'
-        f'<div class="metric-box metric-purple"><div class="metric-label">Mes</div><div class="metric-value">{month_name}</div></div>'
+        f'<div class="metric-box metric-green"><div class="metric-label">Destinatarios únicos</div><div class="metric-value">{unique_recipients}</div></div>'
+        f'<div class="metric-box metric-orange"><div class="metric-label">Dependencias únicas</div><div class="metric-value">{unique_dependencies}</div></div>'
+        f'<div class="metric-box metric-purple"><div class="metric-label">Solicitado por</div><div class="metric-value">{unique_requesters}</div></div>'
         '</div>'
     )
     st.markdown(metrics_html, unsafe_allow_html=True)
@@ -3240,6 +3251,172 @@ def _back_official_months():
     st.session_state.pop("official_month", None)
     st.session_state.pop("official_list_mode", None)
 
+def _official_group_counts(rows: list[dict], field: str, empty_label: str) -> pd.DataFrame:
+    groups: dict[str, dict] = {}
+    for row in rows:
+        raw = str(row.get(field) or "").strip()
+        label = re.sub(r"\s+", " ", raw) if raw else empty_label
+        key = label.casefold()
+        if key not in groups:
+            groups[key] = {"Etiqueta": label, "Oficios": 0}
+        groups[key]["Oficios"] += 1
+    return pd.DataFrame(groups.values()).sort_values(
+        ["Oficios", "Etiqueta"], ascending=[False, True]
+    ) if groups else pd.DataFrame(columns=["Etiqueta", "Oficios"])
+
+
+def _official_letters_analytics(year: int, rows: list[dict]):
+    month_names = {month: name for month, name in MONTHS_ES}
+    month_order = [name for _, name in MONTHS_ES]
+    month_counts = {month: 0 for month, _ in MONTHS_ES}
+    for row in rows:
+        try:
+            month_value = int(row.get("mes") or 0)
+        except (TypeError, ValueError):
+            month_value = 0
+        if month_value in month_counts:
+            month_counts[month_value] += 1
+
+    monthly = pd.DataFrame([
+        {"Mes": month_names[month], "Oficios": month_counts[month], "Orden": month}
+        for month, _ in MONTHS_ES
+    ])
+
+    recipients = _official_group_counts(rows, "destinatario", "Sin destinatario")
+    requesters = _official_group_counts(rows, "solicitado_por", "Sin dato")
+
+    total = len(rows)
+    active_months = sum(1 for value in month_counts.values() if value > 0)
+    avg = (total / active_months) if active_months else 0
+    unique_recipients = max(0, len(recipients) - int("Sin destinatario" in recipients["Etiqueta"].values))
+    unique_requesters = max(0, len(requesters) - int("Sin dato" in requesters["Etiqueta"].values))
+
+    st.markdown(
+        f"""<div class="analytics-banner">
+        <h3>Analítica de Oficios · {year}</h3>
+        <p>Volumen mensual, destinatarios y origen de las solicitudes.</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    metric_cards = [
+        ("Total de oficios", total, "#0798cf"),
+        ("Promedio por mes activo", f"{avg:.1f}", "#009b4c"),
+        ("Destinatarios únicos", unique_recipients, "#16ad8f"),
+        ("Solicitantes únicos", unique_requesters, "#a990c7"),
+    ]
+    cards = "".join(
+        f"""<div class="analytics-metric" style="--tone:{tone}">
+        <div class="analytics-value">{value}</div>
+        <div class="analytics-label">{html.escape(label)}</div></div>"""
+        for label, value, tone in metric_cards
+    )
+    st.markdown(
+        f'<div class="analytics-metrics" style="grid-template-columns:repeat(4,1fr)">{cards}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### Oficios por mes")
+    st.caption("Total de oficios registrados en cada mes.")
+    month_chart = (
+        alt.Chart(monthly)
+        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
+        .encode(
+            x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+            color=alt.Color(
+                "Mes:N",
+                sort=month_order,
+                scale=alt.Scale(
+                    domain=month_order,
+                    range=[
+                        "#0798cf", "#009b4c", "#16ad8f", "#a990c7",
+                        "#f68b08", "#858e93", "#0798cf", "#009b4c",
+                        "#16ad8f", "#a990c7", "#f68b08", "#858e93",
+                    ],
+                ),
+                legend=None,
+            ),
+            tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
+        )
+    )
+    month_labels = (
+        alt.Chart(monthly)
+        .mark_text(dy=-12, fontSize=14, fontWeight="bold", color="#35434b")
+        .encode(
+            x=alt.X("Mes:N", sort=month_order),
+            y="Oficios:Q",
+            text=alt.Text("Oficios:Q", format=".0f"),
+        )
+    )
+    st.altair_chart((month_chart + month_labels).properties(height=390), use_container_width=True)
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("### Principales destinatarios")
+        st.caption("Personas que concentran el mayor número de oficios.")
+        top_recipients = recipients.head(12).sort_values("Oficios", ascending=True)
+        if top_recipients.empty:
+            st.info("No hay información de destinatarios para este año.")
+        else:
+            recipient_order = top_recipients["Etiqueta"].tolist()
+            chart = (
+                alt.Chart(top_recipients)
+                .mark_bar(cornerRadiusEnd=8)
+                .encode(
+                    y=alt.Y("Etiqueta:N", sort=recipient_order, title=None, axis=alt.Axis(labelLimit=250)),
+                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    color=alt.value("#173b63"),
+                    tooltip=[
+                        alt.Tooltip("Etiqueta:N", title="Destinatario"),
+                        alt.Tooltip("Oficios:Q", format=".0f"),
+                    ],
+                )
+            )
+            labels = (
+                alt.Chart(top_recipients)
+                .mark_text(align="left", baseline="middle", dx=6, fontWeight="bold", color="#35434b")
+                .encode(
+                    y=alt.Y("Etiqueta:N", sort=recipient_order),
+                    x="Oficios:Q",
+                    text=alt.Text("Oficios:Q", format=".0f"),
+                )
+            )
+            st.altair_chart((chart + labels).properties(height=430), use_container_width=True)
+
+    with right:
+        st.markdown("### Solicitado por")
+        st.caption("Áreas o personas que originan el mayor número de oficios.")
+        top_requesters = requesters.head(12).sort_values("Oficios", ascending=True)
+        if top_requesters.empty:
+            st.info("No hay información de 'Solicitado por' para este año.")
+        else:
+            requester_order = top_requesters["Etiqueta"].tolist()
+            chart = (
+                alt.Chart(top_requesters)
+                .mark_bar(cornerRadiusEnd=8)
+                .encode(
+                    y=alt.Y("Etiqueta:N", sort=requester_order, title=None, axis=alt.Axis(labelLimit=250)),
+                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    color=alt.value("#6750a4"),
+                    tooltip=[
+                        alt.Tooltip("Etiqueta:N", title="Solicitado por"),
+                        alt.Tooltip("Oficios:Q", format=".0f"),
+                    ],
+                )
+            )
+            labels = (
+                alt.Chart(top_requesters)
+                .mark_text(align="left", baseline="middle", dx=6, fontWeight="bold", color="#35434b")
+                .encode(
+                    y=alt.Y("Etiqueta:N", sort=requester_order),
+                    x="Oficios:Q",
+                    text=alt.Text("Oficios:Q", format=".0f"),
+                )
+            )
+            st.altair_chart((chart + labels).properties(height=430), use_container_width=True)
+
+
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
     top1.button(
@@ -3249,35 +3426,66 @@ def official_letters_year(year: int):
         on_click=_back_official_years,
     )
     top2.markdown(f"## Oficios Dirección General · {year}")
-    st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
+
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
-    counts = {month: {"total": 0, "signed": 0} for month, _ in MONTHS_ES}
+    rows = []
     if client:
         try:
-            rows = client.table("oficios_direccion_general").select("mes,ruta_storage,drive_url").eq("anio", year).execute().data or []
-            for row in rows:
-                month_value = int(row.get("mes") or 0)
-                if month_value in counts:
-                    counts[month_value]["total"] += 1
-                    counts[month_value]["signed"] += int(bool(row.get("ruta_storage") or row.get("drive_url")))
+            rows = (
+                client.table("oficios_direccion_general")
+                .select("mes,destinatario,solicitado_por")
+                .eq("anio", year)
+                .execute()
+                .data or []
+            )
         except Exception:
-            pass
-    colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
-    for start in range(0, 12, 3):
-        columns = st.columns(3, gap="large")
-        for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
-            color = colors[(start + offset) % len(colors)]
-            count = counts.get(month, {"total": 0, "signed": 0})
-            with columns[offset]:
-                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{count["total"]} oficio(s) · {count["signed"]} firmado(s)</p></div>', unsafe_allow_html=True)
-                st.button(
-                    f"Abrir {month_name}",
-                    key=f"official_month_{year}_{month}",
-                    use_container_width=True,
-                    type="primary",
-                    on_click=_go_official_month,
-                    args=(month,),
-                )
+            rows = []
+
+    months_tab, analytics_tab = st.tabs(["Meses", "Analítica"])
+
+    with months_tab:
+        st.markdown(
+            '<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>',
+            unsafe_allow_html=True,
+        )
+        counts = {month: 0 for month, _ in MONTHS_ES}
+        for row in rows:
+            try:
+                month_value = int(row.get("mes") or 0)
+            except (TypeError, ValueError):
+                month_value = 0
+            if month_value in counts:
+                counts[month_value] += 1
+
+        colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
+        for start in range(0, 12, 3):
+            columns = st.columns(3, gap="large")
+            for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
+                color = colors[(start + offset) % len(colors)]
+                count = counts.get(month, 0)
+                with columns[offset]:
+                    st.markdown(
+                        f'<div class="year-card" style="--accent:{color}">'
+                        f'<h2 style="font-size:1.45rem">{month_name}</h2>'
+                        f'<p>{count} oficio(s)</p></div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.button(
+                        f"Abrir {month_name}",
+                        key=f"official_month_{year}_{month}",
+                        use_container_width=True,
+                        type="primary",
+                        on_click=_go_official_month,
+                        args=(month,),
+                    )
+
+    with analytics_tab:
+        if not configured():
+            st.info("La analítica estará disponible al conectar Supabase.")
+        elif not rows:
+            st.info(f"No hay oficios registrados para {year}.")
+        else:
+            _official_letters_analytics(year, rows)
 
 
 def official_letters():
