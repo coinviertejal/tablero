@@ -3309,6 +3309,39 @@ def _official_letter_card(client, document: dict):
 
 
 
+
+def _normalize_folio_key(value) -> str:
+    """Normaliza el folio de control sin alterar su identidad lógica."""
+    if value is None:
+        return ""
+    s = str(value).strip().upper()
+    if not s:
+        return ""
+
+    # Excel puede entregar 90 como 90.0
+    s = re.sub(r"\.0$", "", s)
+
+    # Normaliza espacios y variantes de BIS.
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("_", "-")
+    s = re.sub(r"-+", "-", s)
+
+    # 064BIS / 64-BIS / 64 BIS -> 64-BIS
+    m = re.fullmatch(r"0*(\d+)-?BIS", s)
+    if m:
+        return f"{int(m.group(1))}-BIS"
+
+    # Folio numérico simple: 006 -> 6
+    if re.fullmatch(r"0*\d+", s):
+        try:
+            return str(int(s))
+        except Exception:
+            return s
+
+    return s
+
+
+
 def _office_unique_key(row: dict) -> str:
     """Identidad lógica estable de un oficio.
 
