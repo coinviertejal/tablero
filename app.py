@@ -4015,6 +4015,71 @@ def _official_group_counts(rows: list[dict], field: str, empty_label: str) -> pd
     ) if groups else pd.DataFrame(columns=["Etiqueta", "Oficios"])
 
 
+
+st.markdown("""
+<style>
+/* --- Analítica Oficios: integración visual con fondo general --- */
+div[data-testid="stAltairChart"] {
+    background: transparent !important;
+}
+
+div[data-testid="stAltairChart"] > div {
+    background: transparent !important;
+}
+
+/* Fuerza que el contenedor del tablero no parezca una "hoja blanca pegada". */
+[data-testid="stVerticalBlock"]:has(.oficios-dashboard-marker) {
+    background: transparent !important;
+}
+
+/* Alineación general de analítica */
+.oficios-analytics-wrap {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+/* Tarjetas superiores: ocupar todo el ancho disponible */
+.oficios-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    width: 100%;
+    margin: 0 0 28px 0;
+}
+
+.oficios-metric-card {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+@media (max-width: 1100px) {
+    .oficios-metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 700px) {
+    .oficios-metric-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+def _transparent_altair(chart):
+    """Integra los gráficos con el fondo gris de Streamlit."""
+    try:
+        return (
+            chart
+            .configure(background="transparent")
+            .configure_view(strokeWidth=0, fill="transparent")
+        )
+    except Exception:
+        return chart
+
+
 def _official_letters_analytics(year: int, rows: list[dict]):
     # Mantiene la analítica original y añade un drill-down independiente
     # para los oficios cancelados.
@@ -4072,13 +4137,13 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             ("Solicitantes únicos", unique_requesters, "#a990c7"),
         ]
         cards = "".join(
-            f"""<div class="analytics-metric" style="--tone:{tone}">
+            f"""<div class="analytics-metric oficios-metric-card" style="--tone:{tone}">
             <div class="analytics-value">{value}</div>
             <div class="analytics-label">{html.escape(label)}</div></div>"""
             for label, value, tone in metric_cards
         )
         st.markdown(
-            f'<div class="analytics-metrics" style="grid-template-columns:repeat(4,1fr)">{cards}</div>',
+            f'<div class="oficios-metric-grid">{cards}</div>',
             unsafe_allow_html=True,
         )
 
@@ -4226,7 +4291,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 spacing=28,
             ).configure_view(stroke=None)
 
-            st.altair_chart(dashboard, use_container_width=True)
+            st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
 
     # Analítica principal: sólo oficios vigentes/no cancelados.
     # Los cancelados se muestran exclusivamente en su tarjeta y drill-down.
