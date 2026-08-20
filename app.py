@@ -12,6 +12,7 @@ import subprocess
 import shutil
 import tempfile
 import uuid
+import unicodedata
 
 import pandas as pd
 import altair as alt
@@ -3050,6 +3051,319 @@ MONTHS_ES = [
 ]
 
 
+
+OFFICIAL_THEME_CATALOG = [
+    "Comité de Adquisiciones",
+    "Junta de Gobierno y otros comités",
+    "Adquisiciones y contrataciones",
+    "Presupuesto y finanzas",
+    "Personal y organización",
+    "Jurídico y litigios",
+    "Patrimonio, inmuebles y arrendamientos",
+    "Proyectos e inversión",
+    "Auditoría, control y cumplimiento",
+    "Comisiones y viáticos",
+    "Archivo, transparencia y gestión documental",
+    "Coordinación institucional y enlaces",
+    "Otros / por clasificar",
+]
+
+
+def _theme_text(value) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    raw = unicodedata.normalize("NFKD", raw)
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+    raw = re.sub(r"\s+", " ", raw)
+    return raw
+
+
+def _contains_any(text_value: str, terms: tuple[str, ...] | list[str]) -> bool:
+    return any(term in text_value for term in terms)
+
+
+def _classify_official_letter(row: dict) -> dict:
+    """Clasificación temática determinística para los oficios de Dirección General.
+
+    Se apoya principalmente en ASUNTO y, como contexto, en dependencia,
+    destinatario y cargo. La clasificación se guarda en Supabase para que la
+    analítica no tenga que recalcularse en cada carga.
+    """
+    subject = _theme_text(row.get("asunto"))
+    dependency = _theme_text(row.get("dependencia"))
+    recipient = _theme_text(row.get("destinatario"))
+    role = _theme_text(row.get("cargo"))
+    text_value = " | ".join(v for v in (subject, dependency, recipient, role) if v)
+
+    def result(theme: str, subtheme: str, confidence: float):
+        return {
+            "tema": theme,
+            "subtema": subtheme,
+            "clasificacion_confianza": confidence,
+            "clasificacion_fuente": "reglas_v1",
+        }
+
+    # 1. Comité de Adquisiciones: se separa porque representa una carga propia.
+    if _contains_any(text_value, (
+        "COMITE DE ADQUISICIONES", "COMITÉ DE ADQUISICIONES",
+        "SESION ORDINARIA COMITE", "SESION EXTRAORDINARIA COMITE",
+        "SESIÓN ORDINARIA COMITÉ", "SESIÓN EXTRAORDINARIA COMITÉ",
+        "SIN CONCURRENCIA DEL COMITE", "SIN CONCURRENCIA DEL COMITÉ",
+    )):
+        if "CONVOCATORIA" in text_value:
+            sub = "Convocatorias"
+        elif _contains_any(text_value, ("FALLO", "APERTURA", "BASES", "PROPUESTAS")):
+            sub = "Sesiones, bases y fallos"
+        elif _contains_any(text_value, ("PRESIDENTE SUPLENTE", "SECRETARIO TECNICO", "SECRETARIO TÉCNICO")):
+            sub = "Integración del comité"
+        else:
+            sub = "Gestión del Comité de Adquisiciones"
+        return result("Comité de Adquisiciones", sub, 0.98)
+
+    # 2. Junta de Gobierno y otros órganos colegiados.
+    if _contains_any(text_value, (
+        "JUNTA DE GOBIERNO", "ORDEN DEL DIA", "ORDEN DEL DÍA",
+        "SESION ORDINARIA", "SESIÓN ORDINARIA", "SESION EXTRAORDINARIA", "SESIÓN EXTRAORDINARIA",
+        "COMITE DE TRANSPARENCIA", "COMITÉ DE TRANSPARENCIA",
+        "COMITE DE CONTROL INTERNO", "COMITÉ DE CONTROL INTERNO",
+        "COMITE JALISCO ATRAE", "COMITÉ JALISCO ATRAE",
+        "UNIDAD DE IGUALDAD DE GENERO", "UNIDAD DE IGUALDAD DE GÉNERO",
+    )):
+        if "JUNTA DE GOBIERNO" in text_value or "ORDEN DEL DIA" in text_value or "ORDEN DEL DÍA" in text_value:
+            sub = "Junta de Gobierno"
+        elif "TRANSPARENCIA" in text_value:
+            sub = "Comité de Transparencia"
+        elif "CONTROL INTERNO" in text_value:
+            sub = "Comité de Control Interno"
+        elif "IGUALDAD" in text_value:
+            sub = "Igualdad de Género"
+        elif "JALISCO ATRAE" in text_value:
+            sub = "Comité Jalisco Atrae"
+        else:
+            sub = "Otros órganos colegiados"
+        return result("Junta de Gobierno y otros comités", sub, 0.92)
+
+    # 3. Comisiones y viáticos.
+    if _contains_any(subject, (
+        "COMISION", "COMISIÓN", "VIATICO", "VIÁTICO", "VIAJE", "TRANSPORTE AEREO",
+        "TRANSPORTE AÉREO", "VISITA A ", "REUNION EN ", "REUNIÓN EN ",
+    )):
+        if _contains_any(subject, ("VIATICO", "VIÁTICO")):
+            sub = "Viáticos"
+        elif _contains_any(subject, ("TRANSPORTE AEREO", "TRANSPORTE AÉREO", "EXTRANJERO")):
+            sub = "Traslados y transporte"
+        else:
+            sub = "Comisiones de trabajo"
+        return result("Comisiones y viáticos", sub, 0.97)
+
+    # 4. Presupuesto y finanzas.
+    if _contains_any(text_value, (
+        "PRESUPUEST", "ADECUACION", "ADECUACIÓN", "AMPLIACION", "AMPLIACIÓN",
+        "CUENTA BANCARIA", "CUENTAS BANCARIAS", "SUBSIDIO", "MINISTRACION", "MINISTRACIÓN",
+        "INSTRUCCION DE PAGO", "INSTRUCCIÓN DE PAGO", "SIIF", "NOMINA", "NÓMINA",
+        "ISR", "CUENTA PUBLICA", "CUENTA PÚBLICA", "ESTADOS FINANCIEROS", "EDOS FINANCIEROS",
+    )):
+        if _contains_any(text_value, ("ADECUACION", "ADECUACIÓN", "AMPLIACION", "AMPLIACIÓN", "MODIFICACION PRESUPUEST", "MODIFICACIÓN PRESUPUEST")):
+            sub = "Adecuaciones y ampliaciones presupuestales"
+        elif "CUENTA BANCARIA" in text_value or "CUENTAS BANCARIAS" in text_value:
+            sub = "Cuentas bancarias"
+        elif _contains_any(text_value, ("SUBSIDIO", "PAGO", "MINISTRACION", "MINISTRACIÓN")):
+            sub = "Pagos y ministraciones"
+        elif _contains_any(text_value, ("CUENTA PUBLICA", "CUENTA PÚBLICA", "ESTADOS FINANCIEROS", "EDOS FINANCIEROS")):
+            sub = "Información financiera y cuenta pública"
+        elif "SIIF" in text_value:
+            sub = "Sistemas financieros"
+        else:
+            sub = "Planeación presupuestal"
+        return result("Presupuesto y finanzas", sub, 0.92)
+
+    # 5. Personal y organización.
+    if _contains_any(text_value, (
+        "CONTRATACION DE PERSONAL", "CONTRATACIÓN DE PERSONAL", "ALTA DE PERSONAL",
+        "BAJA DE PERSONAL", "CONSTANCIA DE BAJA", "HOJA DE SERVICIO", "PLANTILLA",
+        "ESTRUCTURA ORGANICA", "ESTRUCTURA ORGÁNICA", "REGLAMENTO INTERNO", "MOP",
+        "ENTREGA RECEPCION", "ENTREGA RECEPCIÓN", "SUPLENCIA", "DESIGNA SUPLENTE",
+        "NOMBRAMIENTO", "VACANTE", "PERSONAL EVENTUAL",
+    )):
+        if _contains_any(text_value, ("CONTRATACION", "CONTRATACIÓN", "ALTA DE PERSONAL", "VACANTE", "PERSONAL EVENTUAL")):
+            sub = "Contratación y altas"
+        elif _contains_any(text_value, ("BAJA DE PERSONAL", "CONSTANCIA DE BAJA", "HOJA DE SERVICIO")):
+            sub = "Bajas y movimientos"
+        elif _contains_any(text_value, ("PLANTILLA", "ESTRUCTURA ORGANICA", "ESTRUCTURA ORGÁNICA", "REGLAMENTO INTERNO", "MOP")):
+            sub = "Estructura, plantilla y normativa interna"
+        elif _contains_any(text_value, ("ENTREGA RECEPCION", "ENTREGA RECEPCIÓN")):
+            sub = "Entrega-recepción"
+        else:
+            sub = "Nombramientos y suplencias"
+        return result("Personal y organización", sub, 0.93)
+
+    # 6. Jurídico y litigios.
+    if _contains_any(text_value, (
+        "JUZGADO", "AMPARO", "RECURSO DE REVOCACION", "RECURSO DE REVOCACIÓN",
+        "ACTOS PREJUDICIALES", "EMPLAZAMIENTO", "CARPETA DE INVESTIGACION", "CARPETA DE INVESTIGACIÓN",
+        "CONVENIO JUDICIAL", "OPINION JURIDICA", "OPINIÓN JURÍDICA", "INCIDENTE",
+        "COMPARECE", "NOTARIA", "NOTARÍA", "TESTIMONIO", "CARTA DE INSTRUCCION", "CARTA DE INSTRUCCIÓN",
+    )):
+        if _contains_any(text_value, ("JUZGADO", "AMPARO", "RECURSO", "EMPLAZAMIENTO", "ACTOS PREJUDICIALES", "INCIDENTE", "COMPARECE")):
+            sub = "Litigios y procedimientos"
+        elif _contains_any(text_value, ("CONVENIO JUDICIAL", "OPINION JURIDICA", "OPINIÓN JURÍDICA")):
+            sub = "Opiniones y convenios jurídicos"
+        elif _contains_any(text_value, ("NOTARIA", "NOTARÍA", "TESTIMONIO", "CARTA DE INSTRUCCION", "CARTA DE INSTRUCCIÓN")):
+            sub = "Gestiones notariales"
+        else:
+            sub = "Asuntos jurídicos"
+        return result("Jurídico y litigios", sub, 0.91)
+
+    # 7. Auditoría, control y cumplimiento.
+    if _contains_any(text_value, (
+        "AUDITORIA", "AUDITORÍA", "OIC", "CONTROL INTERNO", "ANTICORRUPCION", "ANTICORRUPCIÓN",
+        "OBSERVACIONES", "ENTE FISCALIZADOR", "ENTES FISCALIZADORES", "CUMPLIMIENTO A DISPOSICIONES",
+    )):
+        if _contains_any(text_value, ("AUDITORIA", "AUDITORÍA", "OBSERVACIONES", "ENTE FISCALIZADOR", "ENTES FISCALIZADORES")):
+            sub = "Auditorías y observaciones"
+        elif "CONTROL INTERNO" in text_value:
+            sub = "Control interno"
+        elif _contains_any(text_value, ("ANTICORRUPCION", "ANTICORRUPCIÓN")):
+            sub = "Anticorrupción"
+        else:
+            sub = "Cumplimiento"
+        return result("Auditoría, control y cumplimiento", sub, 0.94)
+
+    # 8. Archivo, transparencia y gestión documental.
+    if _contains_any(text_value, (
+        "ARCHIVO", "GESTION DOCUMENTAL", "GESTIÓN DOCUMENTAL", "OFICIALIA DE PARTES", "OFICIALÍA DE PARTES",
+        "TRANSFERENCIA PRIMARIA", "TRANFERECIA PRIMARIA", "PUBLICACION", "PUBLICACIÓN",
+        "PERIODICO OFICIAL", "PERIÓDICO OFICIAL", "TRANSPARENCIA",
+    )):
+        if _contains_any(text_value, ("ARCHIVO", "TRANSFERENCIA PRIMARIA", "TRANFERECIA PRIMARIA")):
+            sub = "Archivo institucional"
+        elif _contains_any(text_value, ("PUBLICACION", "PUBLICACIÓN", "PERIODICO OFICIAL", "PERIÓDICO OFICIAL")):
+            sub = "Publicaciones oficiales"
+        elif "TRANSPARENCIA" in text_value:
+            sub = "Transparencia"
+        else:
+            sub = "Gestión documental"
+        return result("Archivo, transparencia y gestión documental", sub, 0.90)
+
+    # 9. Patrimonio, inmuebles y arrendamientos.
+    if _contains_any(text_value, (
+        "PREDIO", "INMUEBLE", "INMUEBLES", "COMODATO", "ARRENDAMIENTO", "ARRENDAMIENTOS",
+        "CATASTRO", "CATASTRAL", "AVALUO", "AVALÚO", "AVALUOS", "AVALÚOS",
+        "SUBDIVISION", "SUBDIVISIÓN", "COMPRA VENTA", "COMPRAVENTA", "PROPIEDAD",
+        "BIENES MUEBLES", "BIENES INMUEBLES", "RECTIFICACION DE COLINDANCIA", "RECTIFICACIÓN DE COLINDANCIA",
+        "USO DE SUELO",
+    )):
+        if "COMODATO" in text_value:
+            sub = "Comodatos"
+        elif "ARREND" in text_value:
+            sub = "Arrendamientos"
+        elif _contains_any(text_value, ("AVALUO", "AVALÚO", "AVALUOS", "AVALÚOS", "CATASTRO", "CATASTRAL")):
+            sub = "Avalúos y catastro"
+        elif _contains_any(text_value, ("COMPRA VENTA", "COMPRAVENTA")):
+            sub = "Compraventa"
+        elif _contains_any(text_value, ("PREDIO", "SUBDIVISION", "SUBDIVISIÓN", "COLINDANCIA", "USO DE SUELO")):
+            sub = "Predios y ordenamiento"
+        else:
+            sub = "Patrimonio"
+        return result("Patrimonio, inmuebles y arrendamientos", sub, 0.91)
+
+    # 10. Adquisiciones y contrataciones.
+    if _contains_any(text_value, (
+        "LICITACION", "LICITACIÓN", "ADJUDICACION", "ADJUDICACIÓN", "APROVISIONAMIENTO",
+        "ADQUISICION", "ADQUISICIÓN", "SEGURO", "VIGILANCIA", "MANTENIMIENTO",
+        "FOTOCOPIADO", "GASOLINA", "DESPENSA", "LUMINARIA", "VEHICULO", "VEHÍCULO",
+        "EQUIPO DE COMPUTO", "EQUIPO DE CÓMPUTO", "SERVICIO",
+    )):
+        if _contains_any(text_value, ("LICITACION", "LICITACIÓN", "TIEMPOS RECORTADOS")):
+            sub = "Licitaciones y procedimientos"
+        elif "APROVISIONAMIENTO" in text_value:
+            sub = "Aprovisionamientos"
+        elif _contains_any(text_value, ("ADJUDICACION", "ADJUDICACIÓN")):
+            sub = "Adjudicación directa"
+        elif _contains_any(text_value, ("VEHICULO", "VEHÍCULO", "EQUIPO", "LUMINARIA")):
+            sub = "Bienes y equipamiento"
+        else:
+            sub = "Servicios y contrataciones"
+        return result("Adquisiciones y contrataciones", sub, 0.89)
+
+    # 11. Proyectos e inversión.
+    if _contains_any(text_value, (
+        "FIMJA", "PROYECTO", "PARQUE INDUSTRIAL", "CENTRO LOGISTICO", "CENTRO LOGÍSTICO",
+        "CLJ", "PUERTO SECO", "CEA", "INFRAESTRUCTURA", "OBRA PUBLICA", "OBRA PÚBLICA",
+        "PLANTA DE TRATAMIENTO",
+    )):
+        if "FIMJA" in text_value:
+            sub = "FIMJA"
+        elif _contains_any(text_value, ("PARQUE INDUSTRIAL", "CENTRO LOGISTICO", "CENTRO LOGÍSTICO", "CLJ", "PUERTO SECO")):
+            sub = "Parques industriales y CLJ"
+        elif "CEA" in text_value or "PLANTA DE TRATAMIENTO" in text_value:
+            sub = "Infraestructura hídrica"
+        else:
+            sub = "Proyectos estratégicos"
+        return result("Proyectos e inversión", sub, 0.86)
+
+    # 12. Coordinación institucional y enlaces.
+    if _contains_any(text_value, (
+        "DESIGNACION DE ENLACE", "DESIGNACIÓN DE ENLACE", "ENLACE INSTITUCIONAL",
+        "SE DESIGNA ENLACE", "SOLICITUD DE INFORMACION", "SOLICITUD DE INFORMACIÓN",
+        "SE SOLICITA INFORMACION", "SE SOLICITA INFORMACIÓN", "COLABORACION", "COLABORACIÓN",
+        "CONVENIO DE COLABORACION", "CONVENIO DE COLABORACIÓN",
+    )):
+        if "ENLACE" in text_value:
+            sub = "Enlaces institucionales"
+        elif _contains_any(text_value, ("CONVENIO", "COLABORACION", "COLABORACIÓN")):
+            sub = "Coordinación y colaboración"
+        else:
+            sub = "Intercambio de información"
+        return result("Coordinación institucional y enlaces", sub, 0.82)
+
+    return result("Otros / por clasificar", "Asunto genérico o insuficiente", 0.40)
+
+
+def _classify_existing_official_letters(client, years=(2025, 2026)) -> dict:
+    """Backfill temático para oficios ya existentes, preservando clasificación manual."""
+    total = 0
+    by_theme = {}
+    for year in years:
+        rows = (
+            client.table("oficios_direccion_general")
+            .select("id,asunto,dependencia,destinatario,cargo,tema,subtema,clasificacion_manual")
+            .eq("anio", year)
+            .execute()
+            .data or []
+        )
+        updates = []
+        for row in rows:
+            if bool(row.get("clasificacion_manual")):
+                continue
+            cls = _classify_official_letter(row)
+            updates.append({
+                "id": row["id"],
+                **cls,
+                "clasificado_at": datetime.now().isoformat(),
+            })
+            by_theme[cls["tema"]] = by_theme.get(cls["tema"], 0) + 1
+        for offset in range(0, len(updates), 100):
+            batch = updates[offset:offset + 100]
+            for item in batch:
+                row_id = item.pop("id")
+                client.table("oficios_direccion_general").update(item).eq("id", row_id).execute()
+                total += 1
+    return {"actualizados": total, "por_tema": by_theme}
+
+
+def _official_theme_rows(rows: list[dict]) -> list[dict]:
+    """Garantiza tema/subtema incluso antes del backfill físico."""
+    themed = []
+    for row in rows or []:
+        copy_row = dict(row)
+        if not str(copy_row.get("tema") or "").strip():
+            copy_row.update(_classify_official_letter(copy_row))
+        themed.append(copy_row)
+    return themed
+
+
 def _control_text(value) -> str:
     if value is None:
         return ""
@@ -3138,7 +3452,7 @@ def _parse_dg_control_excel(uploaded) -> tuple[list[dict], list[str]]:
                 f"Fila {excel_row}: el oficio {office_number} comparte número/control con otro registro; "
                 f"se conservará como registro independiente (duplicado {duplicate_number})."
             )
-        records.append({
+        base_record = {
             "anio": year,
             "mes": month,
             "numero_oficio": office_number,
@@ -3157,7 +3471,12 @@ def _parse_dg_control_excel(uploaded) -> tuple[list[dict], list[str]]:
             "hoja_origen": "ENVIADOS DG",
             "fila_origen": excel_row,
             "clave_control": control_key,
-        })
+        }
+        classification = _classify_official_letter(base_record)
+        base_record.update(classification)
+        base_record["clasificado_at"] = datetime.now().isoformat()
+        base_record["clasificacion_manual"] = False
+        records.append(base_record)
     return records, warnings
 
 
@@ -3895,6 +4214,123 @@ def _official_letters_analytics(year: int, rows: list[dict]):
         cancelled_mode=False,
     )
 
+
+    # Analítica temática de los oficios enviados.
+    active_rows = _official_theme_rows(active_rows)
+    st.markdown("---")
+    st.markdown("## Temática de los oficios")
+    st.caption("Clasificación automática a partir del asunto y contexto del oficio. Los cancelados no se incluyen en este bloque.")
+
+    theme_counts = {}
+    for row in active_rows:
+        theme = str(row.get("tema") or "Otros / por clasificar").strip()
+        theme_counts[theme] = theme_counts.get(theme, 0) + 1
+
+    theme_df = pd.DataFrame(
+        [{"Tema": key, "Oficios": value} for key, value in theme_counts.items()]
+    ).sort_values(["Oficios", "Tema"], ascending=[False, True])
+
+    if not theme_df.empty:
+        ordered_themes = theme_df["Tema"].tolist()[::-1]
+        theme_chart = (
+            alt.Chart(theme_df)
+            .mark_bar(cornerRadiusEnd=8)
+            .encode(
+                y=alt.Y("Tema:N", sort=ordered_themes, title=None, axis=alt.Axis(labelLimit=320)),
+                x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                color=alt.value("#173b63"),
+                tooltip=[
+                    alt.Tooltip("Tema:N"),
+                    alt.Tooltip("Oficios:Q", format=".0f"),
+                ],
+            )
+        )
+        theme_labels = (
+            alt.Chart(theme_df)
+            .mark_text(align="left", baseline="middle", dx=6, fontWeight="bold", color="#35434b")
+            .encode(
+                y=alt.Y("Tema:N", sort=ordered_themes),
+                x="Oficios:Q",
+                text=alt.Text("Oficios:Q", format=".0f"),
+            )
+        )
+        st.altair_chart((theme_chart + theme_labels).properties(height=460), use_container_width=True)
+
+        theme_options = theme_df["Tema"].tolist()
+        selected_theme = st.selectbox(
+            "Explorar tema",
+            theme_options,
+            key=f"official_theme_select_{year}",
+        )
+        selected_rows = [row for row in active_rows if str(row.get("tema") or "").strip() == selected_theme]
+
+        t1, t2, t3, t4 = st.columns(4)
+        theme_total = len(selected_rows)
+        share = (theme_total / len(active_rows) * 100) if active_rows else 0
+        active_theme_months = len({
+            int(row.get("mes") or 0)
+            for row in selected_rows
+            if int(row.get("mes") or 0) in dict(MONTHS_ES)
+        })
+        subthemes = len({
+            str(row.get("subtema") or "").strip()
+            for row in selected_rows
+            if str(row.get("subtema") or "").strip()
+        })
+        t1.metric("Oficios del tema", theme_total)
+        t2.metric("Participación anual", f"{share:.1f}%")
+        t3.metric("Meses con actividad", active_theme_months)
+        t4.metric("Subtemas", subthemes)
+
+        month_names = {month: name for month, name in MONTHS_ES}
+        theme_monthly = []
+        for month, month_name in MONTHS_ES:
+            theme_monthly.append({
+                "Mes": month_name,
+                "Oficios": sum(1 for row in selected_rows if int(row.get("mes") or 0) == month),
+            })
+        theme_month_df = pd.DataFrame(theme_monthly)
+
+        left_theme, right_theme = st.columns(2, gap="large")
+        with left_theme:
+            st.markdown("### Evolución mensual")
+            st.bar_chart(theme_month_df.set_index("Mes")["Oficios"], use_container_width=True)
+
+            sub_counts = {}
+            for row in selected_rows:
+                sub = str(row.get("subtema") or "Sin subtema").strip() or "Sin subtema"
+                sub_counts[sub] = sub_counts.get(sub, 0) + 1
+            sub_df = pd.DataFrame(
+                [{"Subtema": key, "Oficios": value} for key, value in sub_counts.items()]
+            ).sort_values("Oficios", ascending=False)
+            st.markdown("### Subtemas")
+            if sub_df.empty:
+                st.info("No hay subtemas para esta categoría.")
+            else:
+                st.bar_chart(sub_df.set_index("Subtema")["Oficios"], use_container_width=True)
+
+        with right_theme:
+            st.markdown("### Principales destinatarios")
+            selected_recipients = _official_group_counts(selected_rows, "destinatario", "Sin destinatario").head(10)
+            if selected_recipients.empty:
+                st.info("No hay destinatarios para este tema.")
+            else:
+                st.bar_chart(
+                    selected_recipients.set_index("Etiqueta")["Oficios"],
+                    use_container_width=True,
+                )
+
+            st.markdown("### Solicitado por")
+            selected_requesters = _official_group_counts(selected_rows, "solicitado_por", "Sin dato").head(10)
+            if selected_requesters.empty:
+                st.info("No hay información de 'Solicitado por' para este tema.")
+            else:
+                st.bar_chart(
+                    selected_requesters.set_index("Etiqueta")["Oficios"],
+                    use_container_width=True,
+                )
+
+
     # Tarjeta independiente de cancelados.
     st.markdown(
         """
@@ -3948,7 +4384,7 @@ def official_letters_year(year: int):
         try:
             rows = (
                 client.table("oficios_direccion_general")
-                .select("id,anio,mes,numero_oficio,folio_control,destinatario,dependencia,solicitado_por,asunto,drive_url,ruta_storage,status_control,firma")
+                .select("id,anio,mes,numero_oficio,folio_control,destinatario,cargo,dependencia,solicitado_por,asunto,drive_url,ruta_storage,status_control,firma,tema,subtema,clasificacion_confianza,clasificacion_fuente,clasificacion_manual")
                 .eq("anio", year)
                 .execute()
                 .data or []
@@ -4038,6 +4474,42 @@ def official_letters():
                 when = str(latest.get("completed_at") or latest.get("created_at") or "")[:16].replace("T", " · ")
                 st.info(f"Última ingesta: **{latest.get('nombre_archivo') or 'Archivo'}** · {latest.get('registros_detectados') or 0} registro(s) · por **{latest.get('autor_nombre') or 'Usuario'}** · {when} · {latest.get('estado') or ''}")
 
+            if is_master_admin():
+                st.markdown(
+                    """
+                    <div style="background:#fff4e5;border:1px solid #ffb45c;border-radius:14px;padding:14px 16px;margin-top:12px;">
+                    <b style="color:#d96900;">Administración maestra · Clasificación temática</b><br>
+                    <span style="color:#59636b;">Clasifica o reclasifica los oficios existentes de 2025 y 2026 usando el catálogo temático institucional.</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    "🟧 Clasificar oficios existentes 2025–2026",
+                    key="classify_existing_official_letters",
+                    use_container_width=True,
+                ):
+                    try:
+                        with st.spinner("Clasificando oficios existentes…"):
+                            result = _classify_existing_official_letters(client, years=(2025, 2026))
+                        st.success(f"Clasificación terminada: {result.get('actualizados', 0)} registro(s) actualizados.")
+                        with st.expander("Distribución resultante"):
+                            st.dataframe(
+                                pd.DataFrame([
+                                    {"Tema": key, "Registros": value}
+                                    for key, value in sorted(
+                                        (result.get("por_tema") or {}).items(),
+                                        key=lambda item: item[1],
+                                        reverse=True,
+                                    )
+                                ]),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No fue posible clasificar los oficios existentes: {exc}")
+
         with st.container(border=True):
             st.markdown("### Importar vínculos de Google Drive")
             st.caption(
@@ -4124,7 +4596,7 @@ def official_letters():
         for column, year, color in zip(columns, batch, colors[start:start + len(batch)]):
             with column:
                 total_year = year_counts.get(year, 0)
-                label = "oficio" if total_year == 1 else "oficios"
+                label = "oficio enviado" if total_year == 1 else "oficios enviados"
                 st.markdown(
                     f'''<div class="year-card" style="--accent:{color}">
                         <h2>{year}</h2>
