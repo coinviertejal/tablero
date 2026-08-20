@@ -3310,15 +3310,22 @@ def _official_letter_card(client, document: dict):
 
 
 def _office_unique_key(row: dict) -> str:
-    """Identidad lógica de un oficio para evitar contar duplicados de ingestas."""
-    number = _normalize_office_link_key(row.get("numero_oficio"))
-    if number:
-        return f"NUM|{number}"
+    """Identidad lógica estable de un oficio.
 
+    Para Dirección General, el folio de control es la referencia más estable
+    entre ingestas. El mismo número de oficio puede venir escrito con variantes
+    (DG-E, DGE, DG.E, etc.), así que primero usamos año + folio_control.
+    """
     year = str(row.get("anio") or "").strip()
     folio = _normalize_folio_key(row.get("folio_control"))
     if folio:
         return f"FOLIO|{year}|{folio}"
+
+    number = _normalize_office_link_key(row.get("numero_oficio"))
+    if number:
+        # Limpia sufijos internos usados sólo para permitir duplicados técnicos.
+        number = re.sub(r"\|DUP\d+$", "", number)
+        return f"NUM|{year}|{number}"
 
     return f"ID|{row.get('id') or id(row)}"
 
