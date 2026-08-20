@@ -41,7 +41,7 @@ MODULE_BOARD = "Junta de Gobierno"
 MODULE_COMMITTEES = "Comités"
 MODULE_OFFICIAL_LETTERS = "Oficios Dirección General"
 ALL_MODULES = [MODULE_PROJECTS, MODULE_BOARD, MODULE_COMMITTEES, MODULE_OFFICIAL_LETTERS]
-USER_DIRECTIONS = ["Dirección General", "Dirección de Administración", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
+USER_DIRECTIONS = ["Dirección General", "Dirección Jurídica", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 PROJECT_DIRECTIONS = ["Dirección de Operaciones", "Dirección de Proyectos"]
 MASTER_ADMIN_EMAIL = "yani.limberopulos@jalisco.gob.mx"
 
@@ -95,109 +95,23 @@ def master_delete_control(label: str, object_id: str, key: str, delete_action) -
     """Control destructivo con confirmación escrita, visible sólo al administrador maestro."""
     if not is_master_admin():
         return
-    with st.container(key=f"master_delete_panel_{key}"):
-        with st.expander(f"🟧 Administración maestra · Eliminar {label}"):
-            st.warning("Esta acción es definitiva y eliminará también acuerdos, seguimiento y documentos relacionados.")
-            confirmation = st.text_input(
-                "Para confirmar, escribe ELIMINAR", key=f"master_delete_text_{key}",
-                placeholder="ELIMINAR",
-            )
-            if st.button(
-                f"Eliminar definitivamente {label}", key=f"master_delete_button_{key}",
-                type="primary", use_container_width=True, disabled=confirmation.strip() != "ELIMINAR",
-            ):
-                try:
-                    delete_action()
-                    st.success(f"{label.capitalize()} eliminado definitivamente.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"No fue posible eliminar {label}: {exc}")
+    with st.expander(f"Administración maestra · Eliminar {label}"):
+        st.warning("Esta acción es definitiva y eliminará también acuerdos, seguimiento y documentos relacionados.")
+        confirmation = st.text_input(
+            "Para confirmar, escribe ELIMINAR", key=f"master_delete_text_{key}",
+            placeholder="ELIMINAR",
+        )
+        if st.button(
+            f"Eliminar definitivamente {label}", key=f"master_delete_button_{key}",
+            type="primary", use_container_width=True, disabled=confirmation.strip() != "ELIMINAR",
+        ):
+            try:
+                delete_action()
+                st.success(f"{label.capitalize()} eliminado definitivamente.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No fue posible eliminar {label}: {exc}")
 
-
-
-def _reset_agreement_documents(client, agreement_id: str, kind: str) -> None:
-    """Elimina opcionalmente documentos del expediente del acuerdo y sus archivos físicos."""
-    if kind == "board":
-        table_name = "archivos_acuerdo"
-    else:
-        table_name = "archivos_acuerdo_comite"
-
-    rows = (
-        client.table(table_name)
-        .select("id,ruta_storage")
-        .eq("acuerdo_id", agreement_id)
-        .execute()
-        .data
-        or []
-    )
-    _remove_storage_paths(client, [row.get("ruta_storage") for row in rows])
-    if rows:
-        client.table(table_name).delete().eq("acuerdo_id", agreement_id).execute()
-
-
-def master_reset_agreement_control(
-    client,
-    *,
-    agreement_id: str,
-    agreement_number: str,
-    kind: str,
-    key: str,
-) -> None:
-    """Reinicia el seguimiento sin borrar el acuerdo base. Sólo administrador maestro."""
-    if not is_master_admin():
-        return
-
-    label = "Junta de Gobierno" if kind == "board" else "Comité"
-    rpc_name = "reset_acuerdo_junta_master" if kind == "board" else "reset_acuerdo_comite_master"
-
-    with st.container(key=f"master_admin_panel_{key}"):
-        with st.expander("🟧 Administración maestra · Reiniciar seguimiento del acuerdo"):
-            st.warning(
-                "Esta acción NO elimina el acuerdo, su número, título, texto ni la sesión. "
-                "Sí pondrá en blanco su seguimiento: áreas y personas responsables, fecha compromiso, "
-                "estatus, resultado, cierre/cumplimiento, comentarios/historial y avisos pendientes."
-            )
-    
-            delete_documents = st.checkbox(
-                "También eliminar los documentos de seguimiento de este acuerdo",
-                value=False,
-                key=f"master_reset_docs_{key}",
-                help="Si no marcas esta opción, los documentos permanecerán en el expediente.",
-            )
-    
-            confirmation = st.text_input(
-                f"Para confirmar el reinicio de {agreement_number or 'este acuerdo'}, escribe LIMPIAR",
-                key=f"master_reset_text_{key}",
-                placeholder="LIMPIAR",
-            )
-    
-            if st.button(
-                f"Reiniciar seguimiento · {label}",
-                key=f"master_reset_button_{key}",
-                type="primary",
-                use_container_width=True,
-                disabled=confirmation.strip().upper() != "LIMPIAR",
-            ):
-                try:
-                    if delete_documents:
-                        _reset_agreement_documents(client, agreement_id, kind)
-    
-                    client.rpc(
-                        rpc_name,
-                        {
-                            "p_acuerdo_id": agreement_id,
-                        },
-                    ).execute()
-    
-                    # Cambia la generación de llaves de los widgets. En Streamlit, los widgets ya
-                    # instanciados pueden conservar valores anteriores aunque la BD ya se haya limpiado.
-                    nonce_key = f"agreement_widget_nonce_{agreement_id}"
-                    st.session_state[nonce_key] = int(st.session_state.get(nonce_key, 0)) + 1
-
-                    st.success("Seguimiento reiniciado. El acuerdo base se conservó.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"No fue posible reiniciar el seguimiento: {exc}")
 
 def user_can_project_direction(direction: str) -> bool:
     user = st.session_state.get("user", {})
@@ -247,12 +161,6 @@ st.markdown("""
 .metric-blue{--metric:var(--blue)} .metric-green{--metric:var(--green)} .metric-orange{--metric:var(--orange)} .metric-purple{--metric:var(--purple)}
 .goal-heading { padding:.75rem 1rem; border-radius:10px; margin:1rem 0 .8rem; font-weight:800; border-left:8px solid var(--status-color); background:color-mix(in srgb,var(--status-color) 10%,white); }
 .status-red{--status-color:#b85c62}.status-yellow{--status-color:#c5a44a}.status-green{--status-color:#65a37a}.status-gray{--status-color:#858e93}
-[class*="st-key-master_admin_panel_"] details > summary { background:linear-gradient(90deg,#f68b08,#e56f00)!important; color:white!important; border:1px solid #d96500!important; border-radius:10px!important; font-weight:800!important; }
-[class*="st-key-master_admin_panel_"] details > summary:hover { background:linear-gradient(90deg,#ff9b20,#f07400)!important; color:white!important; }
-[class*="st-key-master_admin_panel_"] details > summary * { color:white!important; }
-[class*="st-key-master_delete_panel_"] details > summary { background:linear-gradient(90deg,#f68b08,#e56f00)!important; color:white!important; border:1px solid #d96500!important; border-radius:10px!important; font-weight:800!important; }
-[class*="st-key-master_delete_panel_"] details > summary:hover { background:linear-gradient(90deg,#ff9b20,#f07400)!important; color:white!important; }
-[class*="st-key-master_delete_panel_"] details > summary * { color:white!important; }
 .fin-progress-wrap { margin:.8rem 0 1rem; }
 .fin-progress-head { display:flex; justify-content:space-between; gap:12px; align-items:end; margin-bottom:.45rem; }
 .fin-progress-label { color:#5f6c74; font-weight:800; }
@@ -1306,7 +1214,7 @@ COMMITTEE_CATALOG = [
     ("Comité de Archivo", "Gestión documental, conservación y cumplimiento archivístico.", "var(--orange)"),
     ("Comité de Control Interno", "Control institucional, riesgos y mejora continua.", "var(--green)"),
 ]
-BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Administración", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
+BOARD_AREAS = ["Dirección Jurídica", "Dirección General", "Dirección de Operaciones", "Dirección de Planeación", "Órgano Interno de Control"]
 
 
 def board_year_label(year: int) -> str:
@@ -1716,185 +1624,6 @@ def _agreement_ficha_pdf(agreement: dict, session: dict, comments: list, history
     doc.build(story); return output.getvalue()
 
 
-
-
-def _active_notification_users(client, required_module: str) -> list[dict]:
-    """Usuarios activos que pueden ser responsables según su nivel de acceso."""
-    try:
-        rows = (
-            client.table("usuarios_autorizados")
-            .select("id,nombre,email,activo,rol,direccion,modulos")
-            .eq("activo", True)
-            .order("nombre")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        return []
-
-    allowed = []
-    for row in rows:
-        email = str(row.get("email") or "").strip()
-        if not email:
-            continue
-        modules = row.get("modulos") or []
-        if row.get("rol") == "administrador" or required_module in modules:
-            allowed.append(row)
-    return allowed
-
-
-def _legacy_responsibles_from_row(row: dict) -> list[dict]:
-    current = row.get("responsables_notificacion")
-    if isinstance(current, list):
-        clean = []
-        for item in current:
-            if not isinstance(item, dict):
-                continue
-            email = str(item.get("email") or "").strip()
-            if email:
-                clean.append({
-                    "id": item.get("id"),
-                    "nombre": item.get("nombre") or email,
-                    "email": email,
-                    "direccion": item.get("direccion"),
-                })
-        if clean:
-            return clean
-
-    # Compatibilidad con la versión anterior de responsable único.
-    if row.get("responsable_email"):
-        return [{
-            "id": row.get("responsable_usuario_id"),
-            "nombre": row.get("responsable_nombre") or row.get("responsable_email"),
-            "email": row.get("responsable_email"),
-            "direccion": None,
-        }]
-    return []
-
-
-def _responsibles_selector(
-    client,
-    *,
-    required_module: str,
-    current_responsibles: list[dict] | None,
-    key: str,
-):
-    users = _active_notification_users(client, required_module)
-    by_id = {str(row["id"]): row for row in users}
-
-    current_ids = []
-    for item in current_responsibles or []:
-        item_id = str(item.get("id") or "")
-        if item_id in by_id:
-            current_ids.append(item_id)
-
-    def _label(value):
-        row = by_id.get(value, {})
-        name = row.get("nombre") or row.get("email") or "Usuario"
-        email = row.get("email") or ""
-        direction = row.get("direccion") or "Sin dirección"
-        return f"{name} · {direction} · {email}"
-
-    selected_ids = st.multiselect(
-        "Personas responsables",
-        options=list(by_id.keys()),
-        default=current_ids,
-        format_func=_label,
-        key=key,
-        help=(
-            f"Sólo aparecen usuarios activos con acceso a {required_module}. "
-            "Cada persona seleccionada recibirá su propio recordatorio por correo."
-        ),
-    )
-
-    selected = []
-    for user_id in selected_ids:
-        row = by_id[user_id]
-        selected.append({
-            "id": row.get("id"),
-            "nombre": row.get("nombre") or row.get("email"),
-            "email": row.get("email"),
-            "direccion": row.get("direccion"),
-        })
-    return selected
-
-
-def _notification_status_caption(deadline, responsibles, enabled, status):
-    if status == "Terminada":
-        return "El acuerdo está terminado; no se enviarán recordatorios."
-    if not enabled:
-        return "Recordatorio por correo desactivado."
-    if not deadline:
-        return "Falta definir la fecha compromiso para programar el aviso."
-    if not responsibles:
-        return "Falta asignar al menos una persona responsable con correo."
-    try:
-        days = (deadline - date.today()).days
-    except Exception:
-        days = None
-
-    recipients = len(responsibles)
-    suffix = f" · {recipients} destinatario(s)"
-    if days is None:
-        return "Recordatorio configurado para 3 días antes del vencimiento" + suffix
-    if days > 3:
-        return f"Correo programado para 3 días antes del vencimiento · faltan {days} días" + suffix
-    if days == 3:
-        return "El correo corresponde enviarse hoy" + suffix
-    if 0 <= days < 3:
-        return f"Faltan {days} día(s). El aviso de 3 días ya debió generarse" + suffix
-    return "La fecha compromiso ya venció" + suffix
-
-
-def _drive_video_preview_url(url: str) -> str | None:
-    url = str(url or "").strip()
-    patterns = [
-        r"drive\.google\.com/file/d/([^/]+)",
-        r"drive\.google\.com/open\?id=([^&]+)",
-        r"drive\.google\.com/uc\?.*?[?&]id=([^&]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url, re.I)
-        if match:
-            return f"https://drive.google.com/file/d/{match.group(1)}/preview"
-    return None
-
-
-def _preview_recording_url(url: str, key: str):
-    url = str(url or "").strip()
-    if not url:
-        return
-
-    st.markdown("#### Previsualización de la videograbación")
-    drive_preview = _drive_video_preview_url(url)
-
-    try:
-        if drive_preview:
-            components.iframe(drive_preview, height=520, scrolling=False)
-        elif re.search(r"(youtube\.com|youtu\.be|vimeo\.com)", url, re.I):
-            st.video(url)
-        elif re.search(r"\.(mp4|webm|mov)(?:\?|$)", url, re.I):
-            st.video(url)
-        else:
-            st.info(
-                "El proveedor de esta URL puede impedir la reproducción embebida. "
-                "Puedes intentar abrirla directamente."
-            )
-        st.link_button(
-            "Abrir videograbación en una pestaña nueva",
-            url,
-            use_container_width=True,
-        )
-    except Exception:
-        st.warning("No fue posible previsualizar esta URL dentro de la app.")
-        st.link_button(
-            "Abrir videograbación",
-            url,
-            use_container_width=True,
-        )
-
-
 def board_session_detail(session: dict):
     year = st.session_state.board_year
     year_label = board_year_label(int(year))
@@ -1941,9 +1670,6 @@ def board_session_detail(session: dict):
         client.table("sesiones_junta").update({"videograbacion_url": video_url.strip() or None}).eq("id", session["id"]).execute()
         st.session_state.board_session["videograbacion_url"] = video_url.strip() or None
         st.success("URL de la videograbación guardada.")
-    if video_url.strip():
-        with media3.expander("Previsualizar videograbación", expanded=False):
-            _preview_recording_url(video_url.strip(), f"board_recording_{session['id']}")
     if uploaded:
         with media1.expander("Previsualizar convocatoria"):
             if not _document_preview(uploaded.getvalue(), uploaded.name, 480):
@@ -2021,7 +1747,7 @@ def board_session_detail(session: dict):
             for offset, row in enumerate(approved_rows, len(existing) + 1):
                 payload.append({"sesion_id": session["id"], "numero": _agreement_code(session, offset), "tipo_registro": row.get("tipo_registro") or "Acuerdo",
                     "titulo": str(row["titulo"]).strip(), "texto": str(row.get("texto") or "").strip(), "areas": [],
-                    "estatus": "Por iniciar", "fecha_compromiso": None, "notificar_email": True})
+                    "estatus": "Por iniciar", "fecha_compromiso": None})
             if payload:
                 client.table("acuerdos_junta").insert(payload).execute(); st.session_state.pop(draft_key, None); st.rerun()
     session_documents = client.table("documentos_sesion_junta").select("*").eq("sesion_id", session["id"]).order("created_at").execute().data or []
@@ -2039,59 +1765,22 @@ def board_session_detail(session: dict):
         status = row.get("estatus") or "Por iniciar"; color = {"Por iniciar": "red", "En proceso": "yellow", "Terminada": "green"}.get(status, "gray")
         areas = ", ".join(row.get("areas") or []) or "Sin responsable"
         status_ribbon = {"Por iniciar": ":red[▌]", "En proceso": ":orange[▌]", "Terminada": ":green[▌]"}.get(status, ":gray[▌]")
-        with st.expander(
-            f"{status_ribbon} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}",
-            expanded=str(row.get("id")) == str(st.session_state.get("deep_link_agreement_id") or ""),
-        ):
-            master_reset_agreement_control(
-                client,
-                agreement_id=str(row["id"]),
-                agreement_number=row.get("numero") or "Acuerdo",
-                kind="board",
-                key=f"board_{row['id']}",
-            )
-            widget_nonce = int(st.session_state.get(f"agreement_widget_nonce_{row['id']}", 0))
+        with st.expander(f"{status_ribbon} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
             summary_status = "En progreso" if status == "En proceso" else status
             summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
             if not is_report: st.caption(f"_{_deadline_label(row.get('fecha_compromiso'), status)}_")
             if row.get("texto"): st.write(row["texto"])
             c1, c2, c3 = st.columns([2, 1, 1])
-            new_areas = c1.multiselect("Áreas responsables", BOARD_AREAS, default=row.get("areas") or [], key=f"areas_{row['id']}_{widget_nonce}")
+            new_areas = c1.multiselect("Áreas responsables", BOARD_AREAS, default=row.get("areas") or [], key=f"areas_{row['id']}")
             statuses = ["Por iniciar", "En proceso", "Terminada"]
             display_statuses = {"Por iniciar": "Por iniciar", "En proceso": "En progreso", "Terminada": "Terminada"}
-            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}_{widget_nonce}")
-            new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}_{widget_nonce}")
-            responsibles = []
-            notify_email = False
-            if not is_report:
-                st.markdown("##### Responsables y notificación")
-                nr1, nr2 = st.columns([3, 1])
-                with nr1:
-                    responsibles = _responsibles_selector(
-                        client,
-                        required_module=MODULE_BOARD,
-                        current_responsibles=_legacy_responsibles_from_row(row),
-                        key=f"board_responsibles_{row['id']}_{widget_nonce}",
-                    )
-                with nr2:
-                    notify_email = st.checkbox(
-                        "Enviar recordatorio por correo",
-                        value=True if row.get("notificar_email") is None else bool(row.get("notificar_email")),
-                        key=f"board_notify_email_{row['id']}_{widget_nonce}",
-                    )
-                st.caption(
-                    _notification_status_caption(
-                        new_date,
-                        responsibles,
-                        notify_email,
-                        new_status,
-                    )
-                )
+            new_status = status if is_report else c2.selectbox("Estatus", statuses, index=statuses.index(status), format_func=lambda value: display_statuses[value], key=f"status_{row['id']}")
+            new_date = None if is_report else c3.date_input("Fecha compromiso", value=date.fromisoformat(row["fecha_compromiso"][:10]) if row.get("fecha_compromiso") else None, key=f"date_{row['id']}")
             result_options = ["Pendiente", "Aprobado", "Rechazado"]
             current_result = row.get("resultado") or "Pendiente"
             new_result = current_result if is_report else st.selectbox("Resultado del acuerdo", result_options,
-                index=result_options.index(current_result), key=f"result_{row['id']}_{widget_nonce}")
+                index=result_options.index(current_result), key=f"result_{row['id']}")
             if not is_report: c3.caption(_deadline_label(new_date.isoformat() if new_date else None, new_status))
             def save_follow_up():
                 close_date = row.get("fecha_cierre")
@@ -2101,27 +1790,9 @@ def board_session_detail(session: dict):
                     compliance = "En tiempo" if new_date and date.fromisoformat(str(close_date)[:10]) <= new_date else ("Extemporáneo" if new_date else "Sin fecha compromiso")
                 else:
                     close_date, compliance = None, None
-                client.table("acuerdos_junta").update({
-                    "areas": new_areas,
-                    "estatus": new_status,
-                    "resultado": new_result,
-                    "fecha_compromiso": new_date.isoformat() if new_date else None,
-                    "fecha_cierre": close_date,
-                    "cumplimiento": compliance,
-                    "responsables_notificacion": responsibles,
-                    "responsable_usuario_id": responsibles[0].get("id") if responsibles else None,
-                    "responsable_nombre": responsibles[0].get("nombre") if responsibles else None,
-                    "responsable_email": responsibles[0].get("email") if responsibles else None,
-                    "notificar_email": bool(notify_email),
-                    "updated_at": datetime.now().isoformat(),
-                }).eq("id", row["id"]).execute()
+                client.table("acuerdos_junta").update({"areas": new_areas, "estatus": new_status, "resultado": new_result, "fecha_compromiso": new_date.isoformat() if new_date else None,
+                    "fecha_cierre": close_date, "cumplimiento": compliance, "updated_at": datetime.now().isoformat()}).eq("id", row["id"]).execute()
                 description = f"Estatus: {display_statuses[new_status]}; responsables: {', '.join(new_areas) or 'sin responsable'}; fecha compromiso: {new_date.isoformat() if new_date else 'sin fecha'}"
-                if responsibles:
-                    description += "; personas responsables: " + ", ".join(
-                        f"{item.get('nombre') or item.get('email')} ({item.get('email')})"
-                        for item in responsibles
-                    )
-                description += f"; aviso por correo: {'sí' if notify_email else 'no'}"
                 if compliance: description += f"; cumplimiento: {compliance}"
                 client.table("historial_acuerdo").insert({"acuerdo_id": row["id"], "autor_id": st.session_state.user["id"],
                     "autor_nombre": st.session_state.user.get("nombre") or st.session_state.user.get("email"), "descripcion": description}).execute()
@@ -2193,7 +1864,7 @@ def board_session_detail(session: dict):
                 all_rows = client.table("acuerdos_junta").select("numero").eq("sesion_id", session["id"]).execute().data or []
                 client.table("acuerdos_junta").insert({"sesion_id": session["id"], "numero": _next_agreement_number(session, all_rows),
                     "tipo_registro": manual_type, "titulo": manual_title.strip(), "texto": manual_text.strip(), "areas": [],
-                    "estatus": "Por iniciar", "fecha_compromiso": None, "notificar_email": True}).execute()
+                    "estatus": "Por iniciar", "fecha_compromiso": None}).execute()
                 st.success("Acuerdo agregado."); st.rerun()
 
 
@@ -2417,7 +2088,7 @@ def committee_session_detail(session: dict, client):
                     "tipo_registro": row.get("tipo_registro") or "Informe",
                     "titulo": str(row.get("titulo") or "").strip(),
                     "texto": str(row.get("texto") or "").strip(), "areas": [],
-                    "estatus": "Por iniciar", "resultado": "Pendiente", "notificar_email": True,
+                    "estatus": "Por iniciar", "resultado": "Pendiente",
                 })
             if payload:
                 client.table("acuerdos_comite").insert(payload).execute()
@@ -2443,14 +2114,6 @@ def committee_session_detail(session: dict, client):
         status = item.get("estatus") or "Por iniciar"
         tone = {"Por iniciar": "🔴", "En proceso": "🟡", "Terminada": "🟢"}.get(status, "⚪")
         with st.expander(f"{tone} {item.get('numero')} · {item.get('titulo')}"):
-            master_reset_agreement_control(
-                client,
-                agreement_id=str(item["id"]),
-                agreement_number=item.get("numero") or "Acuerdo",
-                kind="committee",
-                key=f"committee_{item['id']}",
-            )
-            widget_nonce = int(st.session_state.get(f"agreement_widget_nonce_{item['id']}", 0))
             st.caption(item.get("tipo_registro") or "Punto")
             st.write(item.get("texto") or "Sin descripción adicional.")
             if is_report:
@@ -2458,41 +2121,18 @@ def committee_session_detail(session: dict, client):
                 continue
             area_value = item.get("areas") or []
             areas = st.multiselect("Áreas responsables", BOARD_AREAS, default=[a for a in area_value if a in BOARD_AREAS],
-                                   key=f"committee_areas_{item['id']}_{widget_nonce}")
+                                   key=f"committee_areas_{item['id']}")
             c1, c2, c3 = st.columns(3)
             status_value = c1.selectbox("Estatus", ["Por iniciar", "En proceso", "Terminada"],
                                         index=["Por iniciar", "En proceso", "Terminada"].index(status if status in ["Por iniciar", "En proceso", "Terminada"] else "Por iniciar"),
-                                        key=f"committee_status_{item['id']}_{widget_nonce}")
+                                        key=f"committee_status_{item['id']}")
             result_value = c2.selectbox("Resultado", ["Pendiente", "Aprobado", "Rechazado"],
                                         index=["Pendiente", "Aprobado", "Rechazado"].index(item.get("resultado") if item.get("resultado") in ["Pendiente", "Aprobado", "Rechazado"] else "Pendiente"),
-                                        key=f"committee_result_{item['id']}_{widget_nonce}")
+                                        key=f"committee_result_{item['id']}")
             current_date = date.fromisoformat(str(item["fecha_compromiso"])[:10]) if item.get("fecha_compromiso") else None
-            deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}_{widget_nonce}")
-            st.markdown("##### Responsables y notificación")
-            nr1, nr2 = st.columns([3, 1])
-            with nr1:
-                responsibles = _responsibles_selector(
-                    client,
-                    required_module=MODULE_COMMITTEES,
-                    current_responsibles=_legacy_responsibles_from_row(item),
-                    key=f"committee_responsibles_{item['id']}_{widget_nonce}",
-                )
-            with nr2:
-                notify_email = st.checkbox(
-                    "Enviar recordatorio por correo",
-                    value=True if item.get("notificar_email") is None else bool(item.get("notificar_email")),
-                    key=f"committee_notify_email_{item['id']}_{widget_nonce}",
-                )
-            st.caption(
-                _notification_status_caption(
-                    deadline,
-                    responsibles,
-                    notify_email,
-                    status_value,
-                )
-            )
+            deadline = c3.date_input("Fecha compromiso", value=current_date, key=f"committee_deadline_{item['id']}")
             comment = st.text_area("Comentario de seguimiento", value=item.get("comentario_seguimiento") or "",
-                                   key=f"committee_comment_{item['id']}_{widget_nonce}")
+                                   key=f"committee_comment_{item['id']}")
             st.markdown("#### Documentos de seguimiento")
             st.caption("Adjunta evidencias, oficios, informes o entregables vinculados exclusivamente a este acuerdo.")
             file_name_col, file_col = st.columns([2, 3])
@@ -2537,16 +2177,9 @@ def committee_session_detail(session: dict, client):
             if st.button("Guardar cambios de seguimiento", type="primary", use_container_width=True,
                          key=f"save_committee_followup_{item['id']}"):
                 client.table("acuerdos_comite").update({
-                    "areas": areas,
-                    "estatus": status_value,
-                    "resultado": result_value,
+                    "areas": areas, "estatus": status_value, "resultado": result_value,
                     "fecha_compromiso": deadline.isoformat() if deadline else None,
                     "comentario_seguimiento": comment.strip() or None,
-                    "responsables_notificacion": responsibles,
-                    "responsable_usuario_id": responsibles[0].get("id") if responsibles else None,
-                    "responsable_nombre": responsibles[0].get("nombre") if responsibles else None,
-                    "responsable_email": responsibles[0].get("email") if responsibles else None,
-                    "notificar_email": bool(notify_email),
                     "actualizado_por": st.session_state.user["id"],
                 }).eq("id", item["id"]).execute()
                 st.success("Seguimiento guardado.")
@@ -3243,24 +2876,13 @@ def official_letters_month(year: int, month: int, month_name: str):
             .eq("anio", year).eq("mes", month)
             .order("fila_origen").order("created_at").execute().data or [])
 
-    unique_recipients = len({
-        str(row.get("destinatario") or "").strip().casefold()
-        for row in rows if str(row.get("destinatario") or "").strip()
-    })
-    unique_dependencies = len({
-        str(row.get("dependencia") or "").strip().casefold()
-        for row in rows if str(row.get("dependencia") or "").strip()
-    })
-    unique_requesters = len({
-        str(row.get("solicitado_por") or "").strip().casefold()
-        for row in rows if str(row.get("solicitado_por") or "").strip()
-    })
+    signed_count = sum(bool(row.get("ruta_storage") or row.get("drive_url")) for row in rows)
     metrics_html = (
         '<div class="metric-grid">'
         f'<div class="metric-box metric-blue"><div class="metric-label">Oficios registrados</div><div class="metric-value">{len(rows)}</div></div>'
-        f'<div class="metric-box metric-green"><div class="metric-label">Destinatarios únicos</div><div class="metric-value">{unique_recipients}</div></div>'
-        f'<div class="metric-box metric-orange"><div class="metric-label">Dependencias únicas</div><div class="metric-value">{unique_dependencies}</div></div>'
-        f'<div class="metric-box metric-purple"><div class="metric-label">Solicitado por</div><div class="metric-value">{unique_requesters}</div></div>'
+        f'<div class="metric-box metric-green"><div class="metric-label">Con firmado cargado</div><div class="metric-value">{signed_count}</div></div>'
+        f'<div class="metric-box metric-orange"><div class="metric-label">Pendientes de firmado</div><div class="metric-value">{max(0, len(rows)-signed_count)}</div></div>'
+        f'<div class="metric-box metric-purple"><div class="metric-label">Mes</div><div class="metric-value">{month_name}</div></div>'
         '</div>'
     )
     st.markdown(metrics_html, unsafe_allow_html=True)
@@ -3359,172 +2981,6 @@ def _back_official_months():
     st.session_state.pop("official_month", None)
     st.session_state.pop("official_list_mode", None)
 
-def _official_group_counts(rows: list[dict], field: str, empty_label: str) -> pd.DataFrame:
-    groups: dict[str, dict] = {}
-    for row in rows:
-        raw = str(row.get(field) or "").strip()
-        label = re.sub(r"\s+", " ", raw) if raw else empty_label
-        key = label.casefold()
-        if key not in groups:
-            groups[key] = {"Etiqueta": label, "Oficios": 0}
-        groups[key]["Oficios"] += 1
-    return pd.DataFrame(groups.values()).sort_values(
-        ["Oficios", "Etiqueta"], ascending=[False, True]
-    ) if groups else pd.DataFrame(columns=["Etiqueta", "Oficios"])
-
-
-def _official_letters_analytics(year: int, rows: list[dict]):
-    month_names = {month: name for month, name in MONTHS_ES}
-    month_order = [name for _, name in MONTHS_ES]
-    month_counts = {month: 0 for month, _ in MONTHS_ES}
-    for row in rows:
-        try:
-            month_value = int(row.get("mes") or 0)
-        except (TypeError, ValueError):
-            month_value = 0
-        if month_value in month_counts:
-            month_counts[month_value] += 1
-
-    monthly = pd.DataFrame([
-        {"Mes": month_names[month], "Oficios": month_counts[month], "Orden": month}
-        for month, _ in MONTHS_ES
-    ])
-
-    recipients = _official_group_counts(rows, "destinatario", "Sin destinatario")
-    requesters = _official_group_counts(rows, "solicitado_por", "Sin dato")
-
-    total = len(rows)
-    active_months = sum(1 for value in month_counts.values() if value > 0)
-    avg = (total / active_months) if active_months else 0
-    unique_recipients = max(0, len(recipients) - int("Sin destinatario" in recipients["Etiqueta"].values))
-    unique_requesters = max(0, len(requesters) - int("Sin dato" in requesters["Etiqueta"].values))
-
-    st.markdown(
-        f"""<div class="analytics-banner">
-        <h3>Analítica de Oficios · {year}</h3>
-        <p>Volumen mensual, destinatarios y origen de las solicitudes.</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    metric_cards = [
-        ("Total de oficios", total, "#0798cf"),
-        ("Promedio por mes activo", f"{avg:.1f}", "#009b4c"),
-        ("Destinatarios únicos", unique_recipients, "#16ad8f"),
-        ("Solicitantes únicos", unique_requesters, "#a990c7"),
-    ]
-    cards = "".join(
-        f"""<div class="analytics-metric" style="--tone:{tone}">
-        <div class="analytics-value">{value}</div>
-        <div class="analytics-label">{html.escape(label)}</div></div>"""
-        for label, value, tone in metric_cards
-    )
-    st.markdown(
-        f'<div class="analytics-metrics" style="grid-template-columns:repeat(4,1fr)">{cards}</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("### Oficios por mes")
-    st.caption("Total de oficios registrados en cada mes.")
-    month_chart = (
-        alt.Chart(monthly)
-        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
-        .encode(
-            x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-            color=alt.Color(
-                "Mes:N",
-                sort=month_order,
-                scale=alt.Scale(
-                    domain=month_order,
-                    range=[
-                        "#0798cf", "#009b4c", "#16ad8f", "#a990c7",
-                        "#f68b08", "#858e93", "#0798cf", "#009b4c",
-                        "#16ad8f", "#a990c7", "#f68b08", "#858e93",
-                    ],
-                ),
-                legend=None,
-            ),
-            tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
-        )
-    )
-    month_labels = (
-        alt.Chart(monthly)
-        .mark_text(dy=-12, fontSize=14, fontWeight="bold", color="#35434b")
-        .encode(
-            x=alt.X("Mes:N", sort=month_order),
-            y="Oficios:Q",
-            text=alt.Text("Oficios:Q", format=".0f"),
-        )
-    )
-    st.altair_chart((month_chart + month_labels).properties(height=390), use_container_width=True)
-
-    left, right = st.columns(2, gap="large")
-    with left:
-        st.markdown("### Principales destinatarios")
-        st.caption("Personas que concentran el mayor número de oficios.")
-        top_recipients = recipients.head(12).sort_values("Oficios", ascending=True)
-        if top_recipients.empty:
-            st.info("No hay información de destinatarios para este año.")
-        else:
-            recipient_order = top_recipients["Etiqueta"].tolist()
-            chart = (
-                alt.Chart(top_recipients)
-                .mark_bar(cornerRadiusEnd=8)
-                .encode(
-                    y=alt.Y("Etiqueta:N", sort=recipient_order, title=None, axis=alt.Axis(labelLimit=250)),
-                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                    color=alt.value("#173b63"),
-                    tooltip=[
-                        alt.Tooltip("Etiqueta:N", title="Destinatario"),
-                        alt.Tooltip("Oficios:Q", format=".0f"),
-                    ],
-                )
-            )
-            labels = (
-                alt.Chart(top_recipients)
-                .mark_text(align="left", baseline="middle", dx=6, fontWeight="bold", color="#35434b")
-                .encode(
-                    y=alt.Y("Etiqueta:N", sort=recipient_order),
-                    x="Oficios:Q",
-                    text=alt.Text("Oficios:Q", format=".0f"),
-                )
-            )
-            st.altair_chart((chart + labels).properties(height=430), use_container_width=True)
-
-    with right:
-        st.markdown("### Solicitado por")
-        st.caption("Áreas o personas que originan el mayor número de oficios.")
-        top_requesters = requesters.head(12).sort_values("Oficios", ascending=True)
-        if top_requesters.empty:
-            st.info("No hay información de 'Solicitado por' para este año.")
-        else:
-            requester_order = top_requesters["Etiqueta"].tolist()
-            chart = (
-                alt.Chart(top_requesters)
-                .mark_bar(cornerRadiusEnd=8)
-                .encode(
-                    y=alt.Y("Etiqueta:N", sort=requester_order, title=None, axis=alt.Axis(labelLimit=250)),
-                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                    color=alt.value("#6750a4"),
-                    tooltip=[
-                        alt.Tooltip("Etiqueta:N", title="Solicitado por"),
-                        alt.Tooltip("Oficios:Q", format=".0f"),
-                    ],
-                )
-            )
-            labels = (
-                alt.Chart(top_requesters)
-                .mark_text(align="left", baseline="middle", dx=6, fontWeight="bold", color="#35434b")
-                .encode(
-                    y=alt.Y("Etiqueta:N", sort=requester_order),
-                    x="Oficios:Q",
-                    text=alt.Text("Oficios:Q", format=".0f"),
-                )
-            )
-            st.altair_chart((chart + labels).properties(height=430), use_container_width=True)
-
-
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
     top1.button(
@@ -3534,66 +2990,35 @@ def official_letters_year(year: int):
         on_click=_back_official_years,
     )
     top2.markdown(f"## Oficios Dirección General · {year}")
-
+    st.markdown('<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>', unsafe_allow_html=True)
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token) if configured() else None
-    rows = []
+    counts = {month: {"total": 0, "signed": 0} for month, _ in MONTHS_ES}
     if client:
         try:
-            rows = (
-                client.table("oficios_direccion_general")
-                .select("mes,destinatario,solicitado_por")
-                .eq("anio", year)
-                .execute()
-                .data or []
-            )
-        except Exception:
-            rows = []
-
-    months_tab, analytics_tab = st.tabs(["Meses", "Analítica"])
-
-    with months_tab:
-        st.markdown(
-            '<p class="choice-subtitle">Selecciona el mes que deseas consultar</p>',
-            unsafe_allow_html=True,
-        )
-        counts = {month: 0 for month, _ in MONTHS_ES}
-        for row in rows:
-            try:
+            rows = client.table("oficios_direccion_general").select("mes,ruta_storage,drive_url").eq("anio", year).execute().data or []
+            for row in rows:
                 month_value = int(row.get("mes") or 0)
-            except (TypeError, ValueError):
-                month_value = 0
-            if month_value in counts:
-                counts[month_value] += 1
-
-        colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
-        for start in range(0, 12, 3):
-            columns = st.columns(3, gap="large")
-            for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
-                color = colors[(start + offset) % len(colors)]
-                count = counts.get(month, 0)
-                with columns[offset]:
-                    st.markdown(
-                        f'<div class="year-card" style="--accent:{color}">'
-                        f'<h2 style="font-size:1.45rem">{month_name}</h2>'
-                        f'<p>{count} oficio(s)</p></div>',
-                        unsafe_allow_html=True,
-                    )
-                    st.button(
-                        f"Abrir {month_name}",
-                        key=f"official_month_{year}_{month}",
-                        use_container_width=True,
-                        type="primary",
-                        on_click=_go_official_month,
-                        args=(month,),
-                    )
-
-    with analytics_tab:
-        if not configured():
-            st.info("La analítica estará disponible al conectar Supabase.")
-        elif not rows:
-            st.info(f"No hay oficios registrados para {year}.")
-        else:
-            _official_letters_analytics(year, rows)
+                if month_value in counts:
+                    counts[month_value]["total"] += 1
+                    counts[month_value]["signed"] += int(bool(row.get("ruta_storage") or row.get("drive_url")))
+        except Exception:
+            pass
+    colors = ["var(--blue)", "var(--green)", "var(--teal)", "var(--purple)", "var(--orange)", "var(--gray)"]
+    for start in range(0, 12, 3):
+        columns = st.columns(3, gap="large")
+        for offset, (month, month_name) in enumerate(MONTHS_ES[start:start + 3]):
+            color = colors[(start + offset) % len(colors)]
+            count = counts.get(month, {"total": 0, "signed": 0})
+            with columns[offset]:
+                st.markdown(f'<div class="year-card" style="--accent:{color}"><h2 style="font-size:1.45rem">{month_name}</h2><p>{count["total"]} oficio(s) · {count["signed"]} firmado(s)</p></div>', unsafe_allow_html=True)
+                st.button(
+                    f"Abrir {month_name}",
+                    key=f"official_month_{year}_{month}",
+                    use_container_width=True,
+                    type="primary",
+                    on_click=_go_official_month,
+                    args=(month,),
+                )
 
 
 def official_letters():
@@ -3606,7 +3031,7 @@ def official_letters():
     if selected_year:
         official_letters_year(int(selected_year)); return
     st.markdown('<h1 class="choice-title">Oficios Dirección General</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="choice-subtitle">Archivo institucional de oficios · selecciona el año</p>', unsafe_allow_html=True)
+    st.markdown('<p class="choice-subtitle">Archivo institucional de oficios firmados · selecciona el año</p>', unsafe_allow_html=True)
     if configured():
         client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
         with st.container(border=True):
@@ -3709,10 +3134,7 @@ def official_letters():
                 total_year = year_counts.get(year, 0)
                 label = "oficio" if total_year == 1 else "oficios"
                 st.markdown(
-                    f'''<div class="year-card" style="--accent:{color}">
-                        <h2>{year}</h2>
-                        <p><b>{total_year}</b> {label}</p>
-                    </div>''',
+                    f'<div class="year-card" style="--accent:{color}"><h2>{year}</h2><p><b>{total_year}</b> {label}</p></div>',
                     unsafe_allow_html=True,
                 )
                 st.button(
@@ -3723,68 +3145,6 @@ def official_letters():
                     on_click=_go_official_year,
                     args=(year,),
                 )
-
-
-def _apply_deep_link_from_query():
-    """Abre directamente una sesión/acuerdo desde un vínculo de correo."""
-    try:
-        params = st.query_params
-        modulo = str(params.get("modulo") or "").strip().lower()
-        session_id = str(params.get("sesion_id") or "").strip()
-        agreement_id = str(params.get("acuerdo_id") or "").strip()
-        signature = f"{modulo}|{session_id}|{agreement_id}"
-
-        if not modulo or not session_id:
-            return
-        if st.session_state.get("_deep_link_applied") == signature:
-            return
-        if not configured():
-            return
-
-        client = client_with_token(
-            st.session_state.access_token,
-            st.session_state.refresh_token,
-        )
-
-        if modulo == "junta" and user_can(MODULE_BOARD):
-            rows = (
-                client.table("sesiones_junta")
-                .select("*")
-                .eq("id", session_id)
-                .limit(1)
-                .execute()
-                .data
-                or []
-            )
-            if rows:
-                session = rows[0]
-                st.session_state.page = "Junta de Gobierno"
-                st.session_state.board_year = int(session.get("anio"))
-                st.session_state.board_session = session
-                st.session_state.deep_link_agreement_id = agreement_id or None
-                st.session_state["_deep_link_applied"] = signature
-
-        elif modulo == "comite" and user_can(MODULE_COMMITTEES):
-            rows = (
-                client.table("sesiones_comite")
-                .select("*")
-                .eq("id", session_id)
-                .limit(1)
-                .execute()
-                .data
-                or []
-            )
-            if rows:
-                session = rows[0]
-                st.session_state.page = "Comités"
-                st.session_state.committee_name = session.get("comite")
-                st.session_state.committee_year = int(session.get("anio"))
-                st.session_state.committee_session = session
-                st.session_state.deep_link_agreement_id = agreement_id or None
-                st.session_state["_deep_link_applied"] = signature
-    except Exception:
-        # Si un vínculo profundo falla, la app sigue funcionando normalmente.
-        return
 
 def board_government():
     if not user_can(MODULE_BOARD):
@@ -3910,7 +3270,6 @@ def placeholder(title: str):
 if "user" not in st.session_state:
     login()
 else:
-    _apply_deep_link_from_query()
     with st.sidebar:
         st.markdown(brand_html(sidebar=True), unsafe_allow_html=True)
         if is_master_admin():
