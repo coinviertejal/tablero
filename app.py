@@ -1947,7 +1947,10 @@ def board_session_detail(session: dict):
         status = row.get("estatus") or "Por iniciar"; color = {"Por iniciar": "red", "En proceso": "yellow", "Terminada": "green"}.get(status, "gray")
         areas = ", ".join(row.get("areas") or []) or "Sin responsable"
         status_ribbon = {"Por iniciar": ":red[▌]", "En proceso": ":orange[▌]", "Terminada": ":green[▌]"}.get(status, ":gray[▌]")
-        with st.expander(f"{status_ribbon} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}"):
+        with st.expander(
+            f"{status_ribbon} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}",
+            expanded=str(row.get("id")) == str(st.session_state.get("deep_link_agreement_id") or ""),
+        ):
             summary_status = "En progreso" if status == "En proceso" else status
             summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
@@ -3405,6 +3408,68 @@ def official_letters():
                     args=(year,),
                 )
 
+
+def _apply_deep_link_from_query():
+    """Abre directamente una sesión/acuerdo desde un vínculo de correo."""
+    try:
+        params = st.query_params
+        modulo = str(params.get("modulo") or "").strip().lower()
+        session_id = str(params.get("sesion_id") or "").strip()
+        agreement_id = str(params.get("acuerdo_id") or "").strip()
+        signature = f"{modulo}|{session_id}|{agreement_id}"
+
+        if not modulo or not session_id:
+            return
+        if st.session_state.get("_deep_link_applied") == signature:
+            return
+        if not configured():
+            return
+
+        client = client_with_token(
+            st.session_state.access_token,
+            st.session_state.refresh_token,
+        )
+
+        if modulo == "junta" and user_can(MODULE_BOARD):
+            rows = (
+                client.table("sesiones_junta")
+                .select("*")
+                .eq("id", session_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if rows:
+                session = rows[0]
+                st.session_state.page = "Junta de Gobierno"
+                st.session_state.board_year = int(session.get("anio"))
+                st.session_state.board_session = session
+                st.session_state.deep_link_agreement_id = agreement_id or None
+                st.session_state["_deep_link_applied"] = signature
+
+        elif modulo == "comite" and user_can(MODULE_COMMITTEES):
+            rows = (
+                client.table("sesiones_comite")
+                .select("*")
+                .eq("id", session_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if rows:
+                session = rows[0]
+                st.session_state.page = "Comités"
+                st.session_state.committee_name = session.get("comite")
+                st.session_state.committee_year = int(session.get("anio"))
+                st.session_state.committee_session = session
+                st.session_state.deep_link_agreement_id = agreement_id or None
+                st.session_state["_deep_link_applied"] = signature
+    except Exception:
+        # Si un vínculo profundo falla, la app sigue funcionando normalmente.
+        return
+
 def board_government():
     if not user_can(MODULE_BOARD):
         st.error("No tienes permisos para acceder a Junta de Gobierno.")
@@ -3529,6 +3594,7 @@ def placeholder(title: str):
 if "user" not in st.session_state:
     login()
 else:
+    _apply_deep_link_from_query()
     with st.sidebar:
         st.markdown(brand_html(sidebar=True), unsafe_allow_html=True)
         if is_master_admin():
