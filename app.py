@@ -2868,17 +2868,38 @@ def _import_drive_links(client, uploaded) -> dict:
     details = []
 
     for record in records:
-        # 1) Cruce preferente por folio_control / NO del Excel.
+        # 1) Empieza por folio_control / NO del Excel.
+        #    OJO: el mismo folio se repite entre años, por lo que un folio
+        #    no debe declararse ambiguo hasta intentar desambiguarlo con
+        #    el número completo del oficio.
         candidates = []
+        folio_candidates = []
         if record.get("folio_normalizado"):
-            candidates = folio_index.get(record["folio_normalizado"], [])
+            folio_candidates = folio_index.get(record["folio_normalizado"], [])
 
-        # 2) Si no resolvió por folio, intenta número completo normalizado.
-        if not candidates and record.get("numero_normalizado"):
-            candidates = index.get(record["numero_normalizado"], [])
+        # 2) Si el folio produjo varias coincidencias (por ejemplo 2024/2025/2026),
+        #    intenta quedarte con la que coincide también con numero_oficio.
+        if folio_candidates and record.get("numero_normalizado"):
+            exact_within_folio = [
+                row for row in folio_candidates
+                if _normalize_office_link_key(row.get("numero_oficio")) == record["numero_normalizado"]
+            ]
+            if exact_within_folio:
+                candidates = exact_within_folio
+            elif len(folio_candidates) == 1:
+                candidates = folio_candidates
+        elif len(folio_candidates) == 1:
+            candidates = folio_candidates
 
-        # 3) Fallback por consecutivo + mes + año si el formato difiere.
-        if not candidates and record.get("numero_normalizado"):
+        # 3) Si el folio no resolvió de manera inequívoca, intenta el número
+        #    completo contra toda la base.
+        if len(candidates) != 1 and record.get("numero_normalizado"):
+            exact_global = index.get(record["numero_normalizado"], [])
+            if exact_global:
+                candidates = exact_global
+
+        # 4) Fallback por consecutivo + mes + año si el formato difiere.
+        if len(candidates) != 1 and record.get("numero_normalizado"):
             m = re.search(r"(\d{1,3}(?:-BIS)?)\D+(\d{2})\D+(20\d{2})$", record["numero_normalizado"])
             if m:
                 seq, month, year = m.groups()
@@ -2889,7 +2910,8 @@ def _import_drive_links(client, uploaded) -> dict:
                     m2 = re.search(r"(\d{1,3}(?:-BIS)?)\D+(\d{2})\D+(20\d{2})$", norm)
                     if m2 and m2.groups() == (seq_norm, month, year):
                         fallback.append(row)
-                candidates = fallback
+                if fallback:
+                    candidates = fallback
 
         if len(candidates) == 1:
             office = candidates[0]
