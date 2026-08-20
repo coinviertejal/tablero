@@ -149,59 +149,59 @@ def master_reset_agreement_control(
     label = "Junta de Gobierno" if kind == "board" else "Comité"
     rpc_name = "reset_acuerdo_junta_master" if kind == "board" else "reset_acuerdo_comite_master"
 
-    with st.expander("Administración maestra · Reiniciar seguimiento del acuerdo"):
-        st.warning(
-            "Esta acción NO elimina el acuerdo, su número, título, texto ni la sesión. "
-            "Sí pondrá en blanco su seguimiento: áreas y personas responsables, fecha compromiso, "
-            "estatus, resultado, cierre/cumplimiento, comentarios/historial y avisos pendientes."
-        )
-
-        delete_documents = st.checkbox(
-            "También eliminar los documentos de seguimiento de este acuerdo",
-            value=False,
-            key=f"master_reset_docs_{key}",
-            help="Si no marcas esta opción, los documentos permanecerán en el expediente.",
-        )
-
-        confirmation = st.text_input(
-            f"Para confirmar el reinicio de {agreement_number or 'este acuerdo'}, escribe LIMPIAR",
-            key=f"master_reset_text_{key}",
-            placeholder="LIMPIAR",
-        )
-
-        if st.button(
-            f"Reiniciar seguimiento · {label}",
-            key=f"master_reset_button_{key}",
-            type="primary",
-            use_container_width=True,
-            disabled=confirmation.strip().upper() != "LIMPIAR",
-        ):
-            try:
-                if delete_documents:
-                    _reset_agreement_documents(client, agreement_id, kind)
-
-                client.rpc(
-                    rpc_name,
-                    {
-                        "p_acuerdo_id": agreement_id,
-                    },
-                ).execute()
-
-                # Limpia widgets persistentes de esta sesión para que no reaparezcan valores anteriores.
-                prefixes = (
-                    "areas_", "status_", "date_", "result_", "board_responsibles_", "board_notify_email_",
-                    "committee_areas_", "committee_status_", "committee_result_", "committee_deadline_",
-                    "committee_responsibles_", "committee_notify_email_", "committee_comment_",
-                )
-                for session_key in list(st.session_state.keys()):
-                    if str(agreement_id) in str(session_key) and str(session_key).startswith(prefixes):
-                        st.session_state.pop(session_key, None)
-
-                st.success("Seguimiento reiniciado. El acuerdo base se conservó.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"No fue posible reiniciar el seguimiento: {exc}")
-
+    with st.container(key=f"master_admin_panel_{key}"):
+        with st.expander("🟧 Administración maestra · Reiniciar seguimiento del acuerdo"):
+            st.warning(
+                "Esta acción NO elimina el acuerdo, su número, título, texto ni la sesión. "
+                "Sí pondrá en blanco su seguimiento: áreas y personas responsables, fecha compromiso, "
+                "estatus, resultado, cierre/cumplimiento, comentarios/historial y avisos pendientes."
+            )
+    
+            delete_documents = st.checkbox(
+                "También eliminar los documentos de seguimiento de este acuerdo",
+                value=False,
+                key=f"master_reset_docs_{key}",
+                help="Si no marcas esta opción, los documentos permanecerán en el expediente.",
+            )
+    
+            confirmation = st.text_input(
+                f"Para confirmar el reinicio de {agreement_number or 'este acuerdo'}, escribe LIMPIAR",
+                key=f"master_reset_text_{key}",
+                placeholder="LIMPIAR",
+            )
+    
+            if st.button(
+                f"Reiniciar seguimiento · {label}",
+                key=f"master_reset_button_{key}",
+                type="primary",
+                use_container_width=True,
+                disabled=confirmation.strip().upper() != "LIMPIAR",
+            ):
+                try:
+                    if delete_documents:
+                        _reset_agreement_documents(client, agreement_id, kind)
+    
+                    client.rpc(
+                        rpc_name,
+                        {
+                            "p_acuerdo_id": agreement_id,
+                        },
+                    ).execute()
+    
+                    # Limpia widgets persistentes de esta sesión para que no reaparezcan valores anteriores.
+                    prefixes = (
+                        "areas_", "status_", "date_", "result_", "board_responsibles_", "board_notify_email_",
+                        "committee_areas_", "committee_status_", "committee_result_", "committee_deadline_",
+                        "committee_responsibles_", "committee_notify_email_", "committee_comment_",
+                    )
+                    for session_key in list(st.session_state.keys()):
+                        if str(agreement_id) in str(session_key) and str(session_key).startswith(prefixes):
+                            st.session_state.pop(session_key, None)
+    
+                    st.success("Seguimiento reiniciado. El acuerdo base se conservó.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible reiniciar el seguimiento: {exc}")
 
 def user_can_project_direction(direction: str) -> bool:
     user = st.session_state.get("user", {})
@@ -251,6 +251,9 @@ st.markdown("""
 .metric-blue{--metric:var(--blue)} .metric-green{--metric:var(--green)} .metric-orange{--metric:var(--orange)} .metric-purple{--metric:var(--purple)}
 .goal-heading { padding:.75rem 1rem; border-radius:10px; margin:1rem 0 .8rem; font-weight:800; border-left:8px solid var(--status-color); background:color-mix(in srgb,var(--status-color) 10%,white); }
 .status-red{--status-color:#b85c62}.status-yellow{--status-color:#c5a44a}.status-green{--status-color:#65a37a}.status-gray{--status-color:#858e93}
+[class*="st-key-master_admin_panel_"] details > summary { background:linear-gradient(90deg,#f68b08,#e56f00)!important; color:white!important; border:1px solid #d96500!important; border-radius:10px!important; font-weight:800!important; }
+[class*="st-key-master_admin_panel_"] details > summary:hover { background:linear-gradient(90deg,#ff9b20,#f07400)!important; color:white!important; }
+[class*="st-key-master_admin_panel_"] details > summary * { color:white!important; }
 .fin-progress-wrap { margin:.8rem 0 1rem; }
 .fin-progress-head { display:flex; justify-content:space-between; gap:12px; align-items:end; margin-bottom:.45rem; }
 .fin-progress-label { color:#5f6c74; font-weight:800; }
