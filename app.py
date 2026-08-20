@@ -4029,6 +4029,14 @@ div[data-testid="stVegaLiteChart"] > div {
     background: #f4f7f8 !important;
 }
 
+/* El tablero ocupa todo el ancho y arranca alineado con las tarjetas */
+div[data-testid="stAltairChart"],
+div[data-testid="stVegaLiteChart"] {
+    width: 100% !important;
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+}
+
 /* Fuerza que el contenedor del tablero no parezca una "hoja blanca pegada". */
 [data-testid="stVerticalBlock"]:has(.oficios-dashboard-marker) {
     background: transparent !important;
@@ -4254,7 +4262,6 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 month_bars + month_labels
             ).properties(
                 height=300,
-                padding={"left": 0, "right": 8, "top": 4, "bottom": 0},
             )
 
             def horizontal_chart(field, domain, selection, hover, title, color, filters):
@@ -4305,14 +4312,11 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 "#f68b08", [month_sel, rec_sel, dep_sel, req_sel],
             )
 
-            dashboard = (
-                alt.vconcat(
-                    month_chart,
-                    alt.hconcat(recipient_chart, dependency_chart).resolve_scale(x="independent"),
-                    alt.hconcat(requester_chart, theme_chart).resolve_scale(x="independent"),
-                    spacing=28,
-                )
-                .properties(padding={"left": 0, "right": 0, "top": 0, "bottom": 0})
+            dashboard = alt.vconcat(
+                month_chart,
+                alt.hconcat(recipient_chart, dependency_chart).resolve_scale(x="independent"),
+                alt.hconcat(requester_chart, theme_chart).resolve_scale(x="independent"),
+                spacing=28,
             )
 
             st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
