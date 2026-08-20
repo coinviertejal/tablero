@@ -4276,7 +4276,16 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 width=930,
             )
 
-            def horizontal_chart(field, selection, hover, title, color, filters, max_items=12):
+            def horizontal_chart(
+                field,
+                selection,
+                hover,
+                title,
+                color,
+                filters,
+                max_items=12,
+                category_text_color="#263238",
+            ):
                 chart = base
                 for f in filters:
                     chart = chart.transform_filter(f)
@@ -4295,7 +4304,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
 
                 y_encoding = alt.Y(
                     f"{field}:N",
-                    sort=alt.SortField("Oficios", order="descending"),
+                    sort="-x",
                     title=None,
                     axis=alt.Axis(
                         labels=False,
@@ -4346,7 +4355,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                         dx=7,
                         fontSize=10,
                         fontWeight="bold",
-                        color="#263238",
+                        color=category_text_color,
                     )
                     .encode(
                         y=y_encoding,
@@ -4408,18 +4417,22 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             recipient_chart = horizontal_chart(
                 "Destinatario", rec_sel, rec_hover, "Principales destinatarios · Top 12",
                 "#173b63", [month_sel, dep_sel, req_sel, theme_sel],
+                category_text_color="#ffffff",
             )
             dependency_chart = horizontal_chart(
                 "Dependencia", dep_sel, dep_hover, "Dependencias destinatarias · Top 12",
                 "#0a9b78", [month_sel, rec_sel, req_sel, theme_sel],
+                category_text_color="#16242b",
             )
             requester_chart = horizontal_chart(
                 "Solicitado por", req_sel, req_hover, "Solicitado por · Top 12",
                 "#6750a4", [month_sel, rec_sel, dep_sel, theme_sel],
+                category_text_color="#ffffff",
             )
             theme_chart = horizontal_chart(
                 "Tema", theme_sel, theme_hover, "Temas · Top 12",
                 "#f68b08", [month_sel, rec_sel, dep_sel, req_sel],
+                category_text_color="#16242b",
             )
 
             dashboard = alt.vconcat(
@@ -4428,12 +4441,12 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 alt.hconcat(
                     recipient_chart,
                     dependency_chart,
-                    spacing=24,
+                    spacing=56,
                 ).resolve_scale(x="independent"),
                 alt.hconcat(
                     requester_chart,
                     theme_chart,
-                    spacing=24,
+                    spacing=56,
                 ).resolve_scale(x="independent"),
                 spacing=20,
             )
