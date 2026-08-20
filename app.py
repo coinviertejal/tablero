@@ -3566,6 +3566,32 @@ def _official_letter_card(client, document: dict):
             f"Solicitado por: {html.escape(document.get('solicitado_por') or 'Sin dato')}"
         )
 
+        # Tema y subtema: usa la clasificación guardada; si aún no existe,
+        # la calcula en memoria para no dejar el oficio sin categoría visual.
+        themed_document = dict(document)
+        if not str(themed_document.get("tema") or "").strip():
+            themed_document.update(_classify_official_letter(themed_document))
+        theme = themed_document.get("tema") or "Otros / por clasificar"
+        subtheme = themed_document.get("subtema") or "Sin subtema"
+
+        info.markdown(
+            f"""
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+                <span style="
+                    background:#eaf4fb;color:#175a84;border:1px solid #cfe5f2;
+                    border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;">
+                    Tema: {html.escape(str(theme))}
+                </span>
+                <span style="
+                    background:#f3eef9;color:#694d91;border:1px solid #e2d8f0;
+                    border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;">
+                    Subtema: {html.escape(str(subtheme))}
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         if has_drive_link:
             actions.success("Firmado en Drive")
             actions.link_button(
@@ -3895,7 +3921,7 @@ def official_letters_month(year: int, month: int, month_name: str):
 
     term = st.text_input(
         "Buscar dentro del mes",
-        placeholder="Número, asunto, destinatario, dependencia, solicitante…",
+        placeholder="Número, asunto, destinatario, dependencia, solicitante, tema, subtema…",
         key=f"official_search_{year}_{month}",
     ).strip().lower()
 
@@ -3912,6 +3938,8 @@ def official_letters_month(year: int, month: int, month_name: str):
                 str(row.get("dependencia") or ""),
                 str(row.get("solicitado_por") or ""),
                 str(row.get("status_control") or ""),
+                str(row.get("tema") or ""),
+                str(row.get("subtema") or ""),
             ]).lower()
         ]
 
@@ -3929,6 +3957,8 @@ def official_letters_month(year: int, month: int, month_name: str):
                 "Mes": f"{month_name} {year}",
                 "Destinatario": row.get("destinatario") or "Sin destinatario",
                 "Dependencia / organización destinataria": row.get("dependencia") or "Sin información",
+                "Tema": row.get("tema") or _classify_official_letter(row).get("tema") or "Otros / por clasificar",
+                "Subtema": row.get("subtema") or _classify_official_letter(row).get("subtema") or "Sin subtema",
             })
         st.dataframe(
             pd.DataFrame(list_rows),
