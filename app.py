@@ -4078,11 +4078,33 @@ div[data-testid="stVegaLiteChart"] {
 """, unsafe_allow_html=True)
 
 
+st.markdown("""
+<style>
+div[data-testid="stAltairChart"],
+div[data-testid="stVegaLiteChart"],
+div[data-testid="stAltairChart"] > div,
+div[data-testid="stVegaLiteChart"] > div,
+div[data-testid="stAltairChart"] canvas,
+div[data-testid="stVegaLiteChart"] canvas,
+div[data-testid="stAltairChart"] svg,
+div[data-testid="stVegaLiteChart"] svg {
+    background: #f4f7f8 !important;
+    background-color: #f4f7f8 !important;
+}
+div[data-testid="stAltairChart"],
+div[data-testid="stVegaLiteChart"] {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 def _transparent_altair(chart):
     """Integra los gráficos con el fondo general de Streamlit."""
     try:
         return (
             chart
+            .properties(background="#f4f7f8")
             .configure(background="#f4f7f8")
             .configure_view(strokeWidth=0, fill="#f4f7f8")
             .configure_axis(
@@ -4262,6 +4284,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 month_bars + month_labels
             ).properties(
                 height=300,
+                background="#f4f7f8",
             )
 
             def horizontal_chart(field, domain, selection, hover, title, color, filters):
@@ -4292,6 +4315,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 return (bars + labels).properties(
                     height=320,
                     width=310,
+                    background="#f4f7f8",
                     title=alt.TitleParams(title, anchor="start", fontSize=16, fontWeight="bold"),
                 )
 
@@ -4314,10 +4338,24 @@ def _official_letters_analytics(year: int, rows: list[dict]):
 
             dashboard = alt.vconcat(
                 month_chart,
-                alt.hconcat(recipient_chart, dependency_chart).resolve_scale(x="independent"),
-                alt.hconcat(requester_chart, theme_chart).resolve_scale(x="independent"),
+                alt.hconcat(
+                    recipient_chart,
+                    dependency_chart,
+                    spacing=24,
+                    center=False,
+                    bounds="flush",
+                ).resolve_scale(x="independent"),
+                alt.hconcat(
+                    requester_chart,
+                    theme_chart,
+                    spacing=24,
+                    center=False,
+                    bounds="flush",
+                ).resolve_scale(x="independent"),
                 spacing=28,
-            )
+                center=False,
+                bounds="flush",
+            ).properties(background="#f4f7f8")
 
             st.altair_chart(_transparent_altair(dashboard), use_container_width=True)
 
