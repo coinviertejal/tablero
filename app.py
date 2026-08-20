@@ -3504,6 +3504,9 @@ def _official_group_counts(rows: list[dict], field: str, empty_label: str) -> pd
 
 
 def _official_letters_analytics(year: int, rows: list[dict]):
+    # La analítica debe usar oficios lógicos únicos, no filas físicas de Supabase.
+    rows = _dedupe_office_rows(rows)
+
     month_names = {month: name for month, name in MONTHS_ES}
     month_order = [name for _, name in MONTHS_ES]
     month_counts = {month: 0 for month, _ in MONTHS_ES}
