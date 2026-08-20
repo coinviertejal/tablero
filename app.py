@@ -3308,6 +3308,51 @@ def _official_letter_card(client, document: dict):
                     st.rerun()
 
 
+
+def _office_unique_key(row: dict) -> str:
+    """Identidad lógica de un oficio para evitar contar duplicados de ingestas."""
+    number = _normalize_office_link_key(row.get("numero_oficio"))
+    if number:
+        return f"NUM|{number}"
+
+    year = str(row.get("anio") or "").strip()
+    folio = _normalize_folio_key(row.get("folio_control"))
+    if folio:
+        return f"FOLIO|{year}|{folio}"
+
+    return f"ID|{row.get('id') or id(row)}"
+
+
+def _office_row_score(row: dict) -> int:
+    """Prefiere, entre duplicados, la fila con mayor información y vínculo firmado."""
+    score = 0
+    if row.get("drive_url"):
+        score += 100
+    if row.get("ruta_storage"):
+        score += 80
+    for field in (
+        "destinatario", "dependencia", "asunto", "solicitado_por",
+        "fecha_control", "firma", "status_control", "folio_control"
+    ):
+        if str(row.get(field) or "").strip():
+            score += 1
+    return score
+
+
+def _dedupe_office_rows(rows: list[dict]) -> list[dict]:
+    """Devuelve una sola fila por oficio lógico."""
+    chosen = {}
+    order = []
+    for row in rows or []:
+        key = _office_unique_key(row)
+        if key not in chosen:
+            chosen[key] = row
+            order.append(key)
+        elif _office_row_score(row) > _office_row_score(chosen[key]):
+            chosen[key] = row
+    return [chosen[key] for key in order]
+
+
 def official_letters_month(year: int, month: int, month_name: str):
     top1, top2 = st.columns([1, 5])
     top1.button(
@@ -3326,6 +3371,7 @@ def official_letters_month(year: int, month: int, month_name: str):
     rows = (client.table("oficios_direccion_general").select("*")
             .eq("anio", year).eq("mes", month)
             .order("fila_origen").order("created_at").execute().data or [])
+    rows = _dedupe_office_rows(rows)
 
     unique_recipients = len({
         str(row.get("destinatario") or "").strip().casefold()
@@ -3625,11 +3671,12 @@ def official_letters_year(year: int):
         try:
             rows = (
                 client.table("oficios_direccion_general")
-                .select("mes,destinatario,solicitado_por")
+                .select("id,anio,mes,numero_oficio,folio_control,destinatario,dependencia,solicitado_por,asunto,drive_url,ruta_storage")
                 .eq("anio", year)
                 .execute()
                 .data or []
             )
+            rows = _dedupe_office_rows(rows)
         except Exception:
             rows = []
 
@@ -3776,8 +3823,14 @@ def official_letters():
     year_counts = {year: 0 for year in OFFICIAL_LETTER_YEARS}
     if configured():
         try:
-            count_rows = client.table("oficios_direccion_general").select("anio").execute().data or []
-            for row in count_rows:
+            count_rows = (
+                client.table("oficios_direccion_general")
+                .select("id,anio,numero_oficio,folio_control")
+                .execute()
+                .data or []
+            )
+            unique_rows = _dedupe_office_rows(count_rows)
+            for row in unique_rows:
                 row_year = int(row.get("anio") or 0)
                 if row_year in year_counts:
                     year_counts[row_year] += 1
