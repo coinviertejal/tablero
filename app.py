@@ -3649,175 +3649,278 @@ def _official_group_counts(rows: list[dict], field: str, empty_label: str) -> pd
 
 
 def _official_letters_analytics(year: int, rows: list[dict]):
-    # La analítica trabaja sobre oficios lógicos únicos.
+    # Mantiene la analítica original y añade un drill-down independiente
+    # para los oficios cancelados.
     rows = _dedupe_office_rows(rows)
 
-    month_names = {month: name for month, name in MONTHS_ES}
-
     def _status_text(row):
-        candidates = [
-            row.get("status_control"),
-            row.get("estatus"),
-            row.get("status"),
-            row.get("firma"),
-        ]
-        for value in candidates:
-            s = str(value or "").strip()
-            if s:
-                return s
+        for field in ("status_control", "estatus", "status", "firma"):
+            value = str(row.get(field) or "").strip()
+            if value:
+                return value
         return ""
 
     def _is_cancelled(row):
-        s = _status_text(row).upper()
-        return "CANCEL" in s
-
-    def _is_delivered(row):
-        s = _status_text(row).upper()
-        if _is_cancelled(row):
-            return False
-        delivered_tokens = (
-            "ENTREG",
-            "ENVIAD",
-            "FIRMAD",
-            "COMPLET",
-            "CONCLUID",
-            "ATENDID",
-        )
-        return any(token in s for token in delivered_tokens)
+        return "CANCEL" in _status_text(row).upper()
 
     cancelled_rows = [row for row in rows if _is_cancelled(row)]
-    active_rows = [row for row in rows if not _is_cancelled(row)]
-    delivered_rows = [row for row in active_rows if _is_delivered(row)]
-    pending_rows = [row for row in active_rows if row not in delivered_rows]
 
-    total_registered = len(rows)
-    total_delivered = len(delivered_rows)
-    total_pending = len(pending_rows)
-    total_cancelled = len(cancelled_rows)
+    def _render_analytics_block(data_rows: list[dict], title: str, subtitle: str, cancelled_mode: bool = False):
+        month_names = {month: name for month, name in MONTHS_ES}
+        month_order = [name for _, name in MONTHS_ES]
+        month_counts = {month: 0 for month, _ in MONTHS_ES}
 
-    active_months = sorted({
-        int(row.get("mes"))
-        for row in active_rows
-        if str(row.get("mes") or "").isdigit()
-    })
-    avg_active = (len(active_rows) / len(active_months)) if active_months else 0
+        for row in data_rows:
+            try:
+                month_value = int(row.get("mes") or 0)
+            except (TypeError, ValueError):
+                month_value = 0
+            if month_value in month_counts:
+                month_counts[month_value] += 1
 
-    unique_recipients = len({
-        str(row.get("destinatario") or "").strip().lower()
-        for row in active_rows
-        if str(row.get("destinatario") or "").strip()
-    })
-    unique_requesters = len({
-        str(row.get("solicitado_por") or "").strip().lower()
-        for row in active_rows
-        if str(row.get("solicitado_por") or "").strip()
-    })
+        monthly = pd.DataFrame([
+            {"Mes": month_names[month], "Oficios": month_counts[month], "Orden": month}
+            for month, _ in MONTHS_ES
+        ])
 
+        recipients = _official_group_counts(data_rows, "destinatario", "Sin destinatario")
+        requesters = _official_group_counts(data_rows, "solicitado_por", "Sin dato")
+
+        total = len(data_rows)
+        active_months = sum(1 for value in month_counts.values() if value > 0)
+        avg = (total / active_months) if active_months else 0
+        unique_recipients = max(
+            0,
+            len(recipients) - int("Sin destinatario" in recipients["Etiqueta"].values),
+        )
+        unique_requesters = max(
+            0,
+            len(requesters) - int("Sin dato" in requesters["Etiqueta"].values),
+        )
+
+        banner_class = "analytics-banner"
+        st.markdown(
+            f"""<div class="{banner_class}">
+            <h3>{html.escape(title)}</h3>
+            <p>{html.escape(subtitle)}</p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        metric_cards = [
+            ("Total de oficios" if not cancelled_mode else "Total cancelados", total, "#0798cf" if not cancelled_mode else "#f68b08"),
+            ("Promedio por mes activo", f"{avg:.1f}", "#009b4c"),
+            ("Destinatarios únicos", unique_recipients, "#16ad8f"),
+            ("Solicitantes únicos", unique_requesters, "#a990c7"),
+        ]
+        cards = "".join(
+            f"""<div class="analytics-metric" style="--tone:{tone}">
+            <div class="analytics-value">{value}</div>
+            <div class="analytics-label">{html.escape(label)}</div></div>"""
+            for label, value, tone in metric_cards
+        )
+        st.markdown(
+            f'<div class="analytics-metrics" style="grid-template-columns:repeat(4,1fr)">{cards}</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("### Oficios por mes" if not cancelled_mode else "### Cancelados por mes")
+        st.caption(
+            "Total de oficios registrados en cada mes."
+            if not cancelled_mode
+            else "Total de oficios cancelados registrados en cada mes."
+        )
+
+        chart_range = [
+            "#0798cf", "#009b4c", "#16ad8f", "#a990c7",
+            "#f68b08", "#858e93", "#0798cf", "#009b4c",
+            "#16ad8f", "#a990c7", "#f68b08", "#858e93",
+        ]
+        if cancelled_mode:
+            chart_range = ["#f68b08"] * 12
+
+        month_chart = (
+            alt.Chart(monthly)
+            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
+            .encode(
+                x=alt.X("Mes:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                color=alt.Color(
+                    "Mes:N",
+                    sort=month_order,
+                    scale=alt.Scale(domain=month_order, range=chart_range),
+                    legend=None,
+                ),
+                tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
+            )
+        )
+        month_labels = (
+            alt.Chart(monthly)
+            .mark_text(dy=-12, fontSize=14, fontWeight="bold", color="#35434b")
+            .encode(
+                x=alt.X("Mes:N", sort=month_order),
+                y="Oficios:Q",
+                text=alt.Text("Oficios:Q", format=".0f"),
+            )
+        )
+        st.altair_chart(
+            (month_chart + month_labels).properties(height=390),
+            use_container_width=True,
+        )
+
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.markdown("### Principales destinatarios")
+            st.caption(
+                "Personas que concentran el mayor número de oficios."
+                if not cancelled_mode
+                else "Destinatarios que concentran el mayor número de oficios cancelados."
+            )
+            top_recipients = recipients.head(12).sort_values("Oficios", ascending=True)
+            if top_recipients.empty:
+                st.info("No hay información de destinatarios para este año.")
+            else:
+                recipient_order = top_recipients["Etiqueta"].tolist()
+                chart = (
+                    alt.Chart(top_recipients)
+                    .mark_bar(cornerRadiusEnd=8)
+                    .encode(
+                        y=alt.Y(
+                            "Etiqueta:N",
+                            sort=recipient_order,
+                            title=None,
+                            axis=alt.Axis(labelLimit=250),
+                        ),
+                        x=alt.X(
+                            "Oficios:Q",
+                            title="Número de oficios",
+                            axis=alt.Axis(tickMinStep=1),
+                        ),
+                        color=alt.value("#f68b08" if cancelled_mode else "#173b63"),
+                        tooltip=[
+                            alt.Tooltip("Etiqueta:N", title="Destinatario"),
+                            alt.Tooltip("Oficios:Q", format=".0f"),
+                        ],
+                    )
+                )
+                labels = (
+                    alt.Chart(top_recipients)
+                    .mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=6,
+                        fontWeight="bold",
+                        color="#35434b",
+                    )
+                    .encode(
+                        y=alt.Y("Etiqueta:N", sort=recipient_order),
+                        x="Oficios:Q",
+                        text=alt.Text("Oficios:Q", format=".0f"),
+                    )
+                )
+                st.altair_chart(
+                    (chart + labels).properties(height=430),
+                    use_container_width=True,
+                )
+
+        with right:
+            st.markdown("### Solicitado por")
+            st.caption(
+                "Áreas o personas que originan el mayor número de oficios."
+                if not cancelled_mode
+                else "Áreas o personas que originaron el mayor número de oficios cancelados."
+            )
+            top_requesters = requesters.head(12).sort_values("Oficios", ascending=True)
+            if top_requesters.empty:
+                st.info("No hay información de 'Solicitado por' para este año.")
+            else:
+                requester_order = top_requesters["Etiqueta"].tolist()
+                chart = (
+                    alt.Chart(top_requesters)
+                    .mark_bar(cornerRadiusEnd=8)
+                    .encode(
+                        y=alt.Y(
+                            "Etiqueta:N",
+                            sort=requester_order,
+                            title=None,
+                            axis=alt.Axis(labelLimit=250),
+                        ),
+                        x=alt.X(
+                            "Oficios:Q",
+                            title="Número de oficios",
+                            axis=alt.Axis(tickMinStep=1),
+                        ),
+                        color=alt.value("#f68b08" if cancelled_mode else "#6750a4"),
+                        tooltip=[
+                            alt.Tooltip("Etiqueta:N", title="Solicitado por"),
+                            alt.Tooltip("Oficios:Q", format=".0f"),
+                        ],
+                    )
+                )
+                labels = (
+                    alt.Chart(top_requesters)
+                    .mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=6,
+                        fontWeight="bold",
+                        color="#35434b",
+                    )
+                    .encode(
+                        y=alt.Y("Etiqueta:N", sort=requester_order),
+                        x="Oficios:Q",
+                        text=alt.Text("Oficios:Q", format=".0f"),
+                    )
+                )
+                st.altair_chart(
+                    (chart + labels).properties(height=430),
+                    use_container_width=True,
+                )
+
+    # Analítica principal: exactamente el esquema anterior.
+    _render_analytics_block(
+        rows,
+        f"Analítica de Oficios · {year}",
+        "Volumen mensual, destinatarios y origen de las solicitudes.",
+        cancelled_mode=False,
+    )
+
+    # Tarjeta independiente de cancelados.
     st.markdown(
-        f"""
-        <div style="
-            background: linear-gradient(90deg,#174b7a 0%,#13ad95 100%);
+        """
+        <style>
+        div[data-testid="stButton"] button[kind="secondary"] {
             border-radius: 18px;
-            padding: 28px 24px;
-            color: white;
-            margin-bottom: 22px;
-        ">
-            <div style="font-size:24px;font-weight:800;">Analítica de Oficios · {year}</div>
-            <div style="font-size:16px;margin-top:10px;opacity:.95;">
-                Volumen mensual, destinatarios, solicitantes y cancelaciones.
-            </div>
-        </div>
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3, c4 = st.columns(4)
-    cards = [
-        ("Total registrados", total_registered),
-        ("Entregados", total_delivered),
-        ("Pendientes", total_pending),
-        ("Cancelados", total_cancelled),
-    ]
-    for col, (label, value) in zip((c1, c2, c3, c4), cards):
-        with col:
-            st.markdown(
-                f"""
-                <div style="
-                    background:#fff;border:1px solid #e4e8ec;border-radius:18px;
-                    padding:22px 20px;min-height:126px;box-shadow:0 8px 24px rgba(0,0,0,.06);
-                ">
-                    <div style="font-size:34px;font-weight:800;line-height:1;">{value}</div>
-                    <div style="margin-top:14px;font-size:16px;font-weight:700;color:#44515d;">{label}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    cancel_key = f"show_cancelled_official_analytics_{year}"
+    if cancel_key not in st.session_state:
+        st.session_state[cancel_key] = False
 
-    st.markdown("### Oficios efectivos por mes")
-    st.caption("Incluye entregados y pendientes; excluye cancelados.")
+    st.markdown("### Cancelados")
+    st.caption("Haz clic en la tarjeta para ver la misma analítica, únicamente para los oficios cancelados.")
 
-    monthly_effective = []
-    monthly_cancelled = []
-    for month, name in MONTHS_ES:
-        effective_count = sum(1 for row in active_rows if int(row.get("mes") or 0) == month)
-        cancelled_count = sum(1 for row in cancelled_rows if int(row.get("mes") or 0) == month)
-        monthly_effective.append({"Mes": name, "Oficios": effective_count})
-        monthly_cancelled.append({"Mes": name, "Cancelados": cancelled_count})
+    cancel_col, _ = st.columns([1, 3])
+    with cancel_col:
+        if st.button(
+            f"🟧  {len(cancelled_rows)}  Cancelados",
+            key=f"btn_cancelled_officials_{year}",
+            use_container_width=True,
+        ):
+            st.session_state[cancel_key] = not st.session_state[cancel_key]
 
-    import pandas as pd
-    df_effective = pd.DataFrame(monthly_effective)
-    df_cancelled = pd.DataFrame(monthly_cancelled)
-
-    st.bar_chart(df_effective.set_index("Mes")["Oficios"], use_container_width=True)
-
-    st.markdown("### Cancelados por mes")
-    st.caption("Folios/oficios registrados que quedaron cancelados.")
-    st.bar_chart(df_cancelled.set_index("Mes")["Cancelados"], use_container_width=True)
-
-    rate = (total_cancelled / total_registered * 100) if total_registered else 0
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("Tasa de cancelación", f"{rate:.1f}%")
-    with m2:
-        st.metric("Promedio por mes activo", f"{avg_active:.1f}")
-    with m3:
-        st.metric("Destinatarios únicos", unique_recipients)
-
-    st.markdown("### Destinatarios")
-    recipient_counts = {}
-    for row in active_rows:
-        recipient = str(row.get("destinatario") or "").strip()
-        if recipient:
-            recipient_counts[recipient] = recipient_counts.get(recipient, 0) + 1
-    if recipient_counts:
-        df_rec = (
-            pd.DataFrame(
-                [{"Destinatario": k, "Oficios": v} for k, v in recipient_counts.items()]
-            )
-            .sort_values("Oficios", ascending=False)
-            .head(15)
+    if st.session_state[cancel_key]:
+        st.markdown("---")
+        _render_analytics_block(
+            cancelled_rows,
+            f"Analítica de Oficios Cancelados · {year}",
+            "Volumen mensual, destinatarios y origen de las solicitudes canceladas.",
+            cancelled_mode=True,
         )
-        st.bar_chart(df_rec.set_index("Destinatario")["Oficios"], use_container_width=True)
-    else:
-        st.info("No hay destinatarios disponibles para este año.")
-
-    st.markdown("### Solicitantes")
-    requester_counts = {}
-    for row in active_rows:
-        requester = str(row.get("solicitado_por") or "").strip()
-        if requester:
-            requester_counts[requester] = requester_counts.get(requester, 0) + 1
-    if requester_counts:
-        df_req = (
-            pd.DataFrame(
-                [{"Solicitante": k, "Oficios": v} for k, v in requester_counts.items()]
-            )
-            .sort_values("Oficios", ascending=False)
-            .head(15)
-        )
-        st.bar_chart(df_req.set_index("Solicitante")["Oficios"], use_container_width=True)
-    else:
-        st.info("No hay solicitantes disponibles para este año.")
 
 def official_letters_year(year: int):
     top1, top2 = st.columns([1, 5])
