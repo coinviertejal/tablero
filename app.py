@@ -4304,7 +4304,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
 
                 y_encoding = alt.Y(
                     f"{field}:N",
-                    sort="-x",
+                    sort=alt.SortField("rank", order="ascending"),
                     title=None,
                     axis=alt.Axis(
                         labels=False,
