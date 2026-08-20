@@ -3342,13 +3342,119 @@ def _normalize_folio_key(value) -> str:
 
 
 
-def _office_unique_key(row: dict) -> str:
-    """Identidad lógica estable de un oficio.
+def _canonical_office_number(row: dict) -> str:
+    """Convierte variantes del número de oficio a una clave lógica común.
 
-    Para Dirección General, el folio de control es la referencia más estable
-    entre ingestas. El mismo número de oficio puede venir escrito con variantes
-    (DG-E, DGE, DG.E, etc.), así que primero usamos año + folio_control.
+    Ejemplos equivalentes:
+    DG-E-233-08-2025
+    DGE-233-082025
+    DG.E.233.08.2025
+    DG/E-233-08/2025
     """
+    raw = str(row.get("numero_oficio") or "").strip().upper()
+    if not raw:
+        return ""
+
+    # Quita sufijos internos creados por ingestas para aceptar duplicados técnicos.
+    raw = re.sub(r"\|DUP\d+$", "", raw)
+
+    # Homologa separadores y familias DGE / DGI.
+    s = raw
+    s = s.replace("\\", "/")
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("_", "-")
+    s = s.replace(".", "-")
+    s = s.replace("/", "-")
+    s = re.sub(r"-+", "-", s)
+
+    # DGE / DGI / DG1 y variantes.
+    s = re.sub(r"^DG-?E", "DG-E", s)
+    s = re.sub(r"^DG-?I", "DG-I", s)
+    s = re.sub(r"^DG-?1", "DG-I", s)
+
+    # Busca tipo.
+    type_code = ""
+    if s.startswith("DG-E"):
+        type_code = "E"
+        tail = s[4:]
+    elif s.startswith("DG-I"):
+        type_code = "I"
+        tail = s[4:]
+    else:
+        # Respaldo para capturas extrañas: DGE..., DGI...
+        mtype = re.match(r"^DG([EI])", s)
+        if mtype:
+            type_code = mtype.group(1)
+            tail = s[mtype.end():]
+        else:
+            return ""
+
+    tail = tail.strip("-")
+
+    # Año: preferir el que venga en el número; si no, usar la columna anio.
+    year_match = re.search(r"(20\d{2})$", tail)
+    if year_match:
+        year = year_match.group(1)
+        before_year = tail[:year_match.start()].strip("-")
+    else:
+        year = str(row.get("anio") or "").strip()
+        if not re.fullmatch(r"20\d{2}", year):
+            return ""
+        before_year = tail
+
+    # Normaliza formatos MMYYYY pegados, por ejemplo 082025.
+    before_year = re.sub(rf"(\d{{2}}){re.escape(year)}$", r"\1", before_year)
+
+    # Extrae todas las partes numéricas / BIS antes del año.
+    parts = [p for p in before_year.split("-") if p]
+    if not parts:
+        return ""
+
+    # Consecutivo y BIS.
+    seq = None
+    bis = False
+    month = None
+
+    # Casos como 233-BIS-08 o 233-08.
+    for i, p in enumerate(parts):
+        if seq is None and re.fullmatch(r"\d{1,4}", p):
+            seq = str(int(p))
+            if i + 1 < len(parts) and parts[i + 1] == "BIS":
+                bis = True
+                # mes después de BIS
+                if i + 2 < len(parts) and re.fullmatch(r"\d{1,2}", parts[i + 2]):
+                    month = f"{int(parts[i + 2]):02d}"
+            elif i + 1 < len(parts) and re.fullmatch(r"\d{1,2}", parts[i + 1]):
+                month = f"{int(parts[i + 1]):02d}"
+            break
+
+    # Casos compactos tipo 233BIS o 233-BIS.
+    if seq is None:
+        compact = re.search(r"(\d{1,4})(BIS)?", before_year)
+        if compact:
+            seq = str(int(compact.group(1)))
+            bis = bool(compact.group(2))
+
+    # Fallback de mes: último número de 1-2 dígitos antes del año, distinto del consecutivo.
+    if month is None:
+        nums = re.findall(r"(?<!\d)(0?[1-9]|1[0-2])(?!\d)", before_year)
+        if nums:
+            month = f"{int(nums[-1]):02d}"
+
+    if not seq or not month:
+        return ""
+
+    seq_part = f"{seq}-BIS" if bis else seq
+    return f"DG/{type_code}-{seq_part}-{month}/{year}"
+
+
+def _office_unique_key(row: dict) -> str:
+    """Identidad lógica de un oficio para conteos y analítica."""
+    canonical = _canonical_office_number(row)
+    if canonical:
+        return f"NUM|{canonical}"
+
+    # Respaldo sólo cuando el número no puede reconstruirse.
     year = str(row.get("anio") or "").strip()
     folio = _normalize_folio_key(row.get("folio_control"))
     if folio:
@@ -3356,9 +3462,8 @@ def _office_unique_key(row: dict) -> str:
 
     number = _normalize_office_link_key(row.get("numero_oficio"))
     if number:
-        # Limpia sufijos internos usados sólo para permitir duplicados técnicos.
         number = re.sub(r"\|DUP\d+$", "", number)
-        return f"NUM|{year}|{number}"
+        return f"RAW|{year}|{number}"
 
     return f"ID|{row.get('id') or id(row)}"
 
