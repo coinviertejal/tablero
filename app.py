@@ -4190,7 +4190,8 @@ def _official_letters_analytics(year: int, rows: list[dict]):
         st.caption(
             "Haz clic en una barra para seleccionar un valor de esa dimensión. "
             "Puedes combinar Mes + Destinatario + Dependencia + Solicitado por + Tema. "
-            "Un nuevo clic sustituye la selección de esa dimensión; doble clic la limpia."
+            "Un nuevo clic sustituye la selección de esa dimensión; doble clic la limpia. "
+            "Para ampliar el tablero, pasa el mouse sobre la gráfica y usa el botón ⛶ de la esquina superior derecha."
         )
         st.markdown("#### Oficios por mes" if not cancelled_mode else "#### Cancelados por mes")
 
@@ -4427,7 +4428,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             requester_chart = horizontal_chart(
                 "Solicitado por", req_sel, req_hover, "Solicitado por · Top 12",
                 "#6750a4", [month_sel, rec_sel, dep_sel, theme_sel],
-                category_text_color="#ffffff",
+                category_text_color="#16242b",
             )
             theme_chart = horizontal_chart(
                 "Tema", theme_sel, theme_hover, "Temas · Top 12",
@@ -4435,18 +4436,28 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 category_text_color="#16242b",
             )
 
+            # Separador visual real para desplazar la columna derecha.
+            spacer_chart = (
+                alt.Chart(pd.DataFrame({"x": [0]}))
+                .mark_point(opacity=0)
+                .encode(x=alt.X("x:Q", axis=None))
+                .properties(width=80, height=1)
+            )
+
             dashboard = alt.vconcat(
                 filtered_count,
                 month_chart,
                 alt.hconcat(
                     recipient_chart,
+                    spacer_chart,
                     dependency_chart,
-                    spacing=56,
+                    spacing=0,
                 ).resolve_scale(x="independent"),
                 alt.hconcat(
                     requester_chart,
+                    spacer_chart,
                     theme_chart,
-                    spacing=56,
+                    spacing=0,
                 ).resolve_scale(x="independent"),
                 spacing=20,
             )
