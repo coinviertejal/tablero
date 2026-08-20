@@ -4273,7 +4273,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 month_bars + month_labels
             ).properties(
                 height=300,
-                width=1240,
+                width=930,
             )
 
             def horizontal_chart(field, selection, hover, title, color, filters, max_items=12):
@@ -4293,18 +4293,37 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     .transform_filter(f"datum.rank <= {int(max_items)}")
                 )
 
+                y_encoding = alt.Y(
+                    f"{field}:N",
+                    sort=alt.SortField("Oficios", order="descending"),
+                    title=None,
+                    axis=alt.Axis(
+                        labels=False,
+                        ticks=False,
+                        domain=False,
+                        title=None,
+                    ),
+                )
+
                 bars = (
                     chart.mark_bar(cornerRadiusEnd=8)
                     .encode(
-                        y=alt.Y(
-                            f"{field}:N",
-                            sort=alt.SortField("Oficios", order="descending"),
-                            title=None,
-                            axis=alt.Axis(labelLimit=180),
+                        y=y_encoding,
+                        x=alt.X(
+                            "Oficios:Q",
+                            title="Número de oficios",
+                            axis=alt.Axis(tickMinStep=1),
                         ),
-                        x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
-                        color=alt.condition(selection | hover, alt.value(color), alt.value("#c7cdd2")),
-                        opacity=alt.condition(selection | hover, alt.value(1), alt.value(0.78)),
+                        color=alt.condition(
+                            selection | hover,
+                            alt.value(color),
+                            alt.value("#c7cdd2"),
+                        ),
+                        opacity=alt.condition(
+                            selection | hover,
+                            alt.value(1),
+                            alt.value(0.78),
+                        ),
                         tooltip=[
                             alt.Tooltip(f"{field}:N", title=field),
                             alt.Tooltip("Oficios:Q", format=".0f"),
@@ -4312,25 +4331,55 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     )
                     .add_params(selection, hover)
                 )
-                labels = chart.mark_text(
-                    align="left",
-                    baseline="middle",
-                    dx=5,
-                    fontSize=11,
-                    fontWeight="bold",
-                    color="#35434b",
-                ).encode(
-                    y=alt.Y(
-                        f"{field}:N",
-                        sort=alt.SortField("Oficios", order="descending"),
-                    ),
-                    x="Oficios:Q",
-                    text=alt.Text("Oficios:Q", format=".0f"),
+
+                # Nombre de la categoría dentro de la barra. Se trunca visualmente
+                # si es muy largo; el tooltip conserva el texto completo.
+                category_labels = (
+                    chart
+                    .transform_calculate(
+                        CategoriaCorta=f"length(datum['{field}']) > 24 ? "
+                        f"substring(datum['{field}'], 0, 24) + '…' : datum['{field}']"
+                    )
+                    .mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=7,
+                        fontSize=10,
+                        fontWeight="bold",
+                        color="#263238",
+                    )
+                    .encode(
+                        y=y_encoding,
+                        x=alt.value(0),
+                        text="CategoriaCorta:N",
+                    )
                 )
-                return (bars + labels).properties(
+
+                value_labels = (
+                    chart.mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=5,
+                        fontSize=11,
+                        fontWeight="bold",
+                        color="#35434b",
+                    )
+                    .encode(
+                        y=y_encoding,
+                        x="Oficios:Q",
+                        text=alt.Text("Oficios:Q", format=".0f"),
+                    )
+                )
+
+                return (bars + category_labels + value_labels).properties(
                     height=320,
-                    width=310,
-                    title=alt.TitleParams(title, anchor="start", fontSize=16, fontWeight="bold"),
+                    width=430,
+                    title=alt.TitleParams(
+                        title,
+                        anchor="start",
+                        fontSize=16,
+                        fontWeight="bold",
+                    ),
                 )
 
             # Contador de control: permite comprobar que las selecciones estén bien.
@@ -4353,7 +4402,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     color="#35434b",
                 )
                 .encode(text="Etiqueta:N")
-                .properties(height=34, width=1240)
+                .properties(height=34, width=930)
             )
 
             recipient_chart = horizontal_chart(
