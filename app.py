@@ -113,6 +113,96 @@ def master_delete_control(label: str, object_id: str, key: str, delete_action) -
                 st.error(f"No fue posible eliminar {label}: {exc}")
 
 
+
+def _reset_agreement_documents(client, agreement_id: str, kind: str) -> None:
+    """Elimina opcionalmente documentos del expediente del acuerdo y sus archivos físicos."""
+    if kind == "board":
+        table_name = "archivos_acuerdo"
+    else:
+        table_name = "archivos_acuerdo_comite"
+
+    rows = (
+        client.table(table_name)
+        .select("id,ruta_storage")
+        .eq("acuerdo_id", agreement_id)
+        .execute()
+        .data
+        or []
+    )
+    _remove_storage_paths(client, [row.get("ruta_storage") for row in rows])
+    if rows:
+        client.table(table_name).delete().eq("acuerdo_id", agreement_id).execute()
+
+
+def master_reset_agreement_control(
+    client,
+    *,
+    agreement_id: str,
+    agreement_number: str,
+    kind: str,
+    key: str,
+) -> None:
+    """Reinicia el seguimiento sin borrar el acuerdo base. Sólo administrador maestro."""
+    if not is_master_admin():
+        return
+
+    label = "Junta de Gobierno" if kind == "board" else "Comité"
+    rpc_name = "reset_acuerdo_junta_master" if kind == "board" else "reset_acuerdo_comite_master"
+
+    with st.expander("Administración maestra · Reiniciar seguimiento del acuerdo"):
+        st.warning(
+            "Esta acción NO elimina el acuerdo, su número, título, texto ni la sesión. "
+            "Sí pondrá en blanco su seguimiento: áreas y personas responsables, fecha compromiso, "
+            "estatus, resultado, cierre/cumplimiento, comentarios/historial y avisos pendientes."
+        )
+
+        delete_documents = st.checkbox(
+            "También eliminar los documentos de seguimiento de este acuerdo",
+            value=False,
+            key=f"master_reset_docs_{key}",
+            help="Si no marcas esta opción, los documentos permanecerán en el expediente.",
+        )
+
+        confirmation = st.text_input(
+            f"Para confirmar el reinicio de {agreement_number or 'este acuerdo'}, escribe LIMPIAR",
+            key=f"master_reset_text_{key}",
+            placeholder="LIMPIAR",
+        )
+
+        if st.button(
+            f"Reiniciar seguimiento · {label}",
+            key=f"master_reset_button_{key}",
+            type="primary",
+            use_container_width=True,
+            disabled=confirmation.strip().upper() != "LIMPIAR",
+        ):
+            try:
+                if delete_documents:
+                    _reset_agreement_documents(client, agreement_id, kind)
+
+                client.rpc(
+                    rpc_name,
+                    {
+                        "p_acuerdo_id": agreement_id,
+                    },
+                ).execute()
+
+                # Limpia widgets persistentes de esta sesión para que no reaparezcan valores anteriores.
+                prefixes = (
+                    "areas_", "status_", "date_", "result_", "board_responsibles_", "board_notify_email_",
+                    "committee_areas_", "committee_status_", "committee_result_", "committee_deadline_",
+                    "committee_responsibles_", "committee_notify_email_", "committee_comment_",
+                )
+                for session_key in list(st.session_state.keys()):
+                    if str(agreement_id) in str(session_key) and str(session_key).startswith(prefixes):
+                        st.session_state.pop(session_key, None)
+
+                st.success("Seguimiento reiniciado. El acuerdo base se conservó.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No fue posible reiniciar el seguimiento: {exc}")
+
+
 def user_can_project_direction(direction: str) -> bool:
     user = st.session_state.get("user", {})
     return user.get("rol") == "administrador" or direction in (user.get("direcciones_proyectos") or [])
@@ -1951,6 +2041,13 @@ def board_session_detail(session: dict):
             f"{status_ribbon} {row.get('numero') or 'Sin código'} · {row.get('tipo_registro') or 'Acuerdo'} · {row.get('titulo')}",
             expanded=str(row.get("id")) == str(st.session_state.get("deep_link_agreement_id") or ""),
         ):
+            master_reset_agreement_control(
+                client,
+                agreement_id=str(row["id"]),
+                agreement_number=row.get("numero") or "Acuerdo",
+                kind="board",
+                key=f"board_{row['id']}",
+            )
             summary_status = "En progreso" if status == "En proceso" else status
             summary = areas if is_report else f"{summary_status} · {areas}"
             st.markdown(f'<div class="goal-heading status-{"gray" if is_report else color}">{html.escape(summary)}</div>', unsafe_allow_html=True)
@@ -2343,6 +2440,13 @@ def committee_session_detail(session: dict, client):
         status = item.get("estatus") or "Por iniciar"
         tone = {"Por iniciar": "🔴", "En proceso": "🟡", "Terminada": "🟢"}.get(status, "⚪")
         with st.expander(f"{tone} {item.get('numero')} · {item.get('titulo')}"):
+            master_reset_agreement_control(
+                client,
+                agreement_id=str(item["id"]),
+                agreement_number=item.get("numero") or "Acuerdo",
+                kind="committee",
+                key=f"committee_{item['id']}",
+            )
             st.caption(item.get("tipo_registro") or "Punto")
             st.write(item.get("texto") or "Sin descripción adicional.")
             if is_report:
