@@ -25,7 +25,7 @@ from pptx import Presentation
 from pypdf import PdfReader
 import fitz
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import letter
@@ -3861,6 +3861,303 @@ def _official_active_rows(rows: list[dict]) -> list[dict]:
 
 
 
+def _official_report_counts(rows: list[dict], field: str, empty_label: str = "Sin información") -> list[tuple[str, int]]:
+    counts: dict[str, dict] = {}
+    for row in rows or []:
+        raw = str(row.get(field) or "").strip()
+        label = re.sub(r"\s+", " ", raw) if raw else empty_label
+        key = label.casefold()
+        if key not in counts:
+            counts[key] = {"label": label, "count": 0}
+        counts[key]["count"] += 1
+    return sorted(
+        [(item["label"], item["count"]) for item in counts.values()],
+        key=lambda item: (-item[1], item[0].casefold()),
+    )
+
+
+def _official_report_theme_counts(rows: list[dict]) -> list[tuple[str, int]]:
+    themed_rows = _official_theme_rows(rows)
+    return _official_report_counts(themed_rows, "tema", "Otros / por clasificar")
+
+
+def _official_report_font(size: int, bold: bool = False):
+    candidates = [
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _official_report_chart(title: str, data: list[tuple[str, int]], accent: str, top_n: int = 8) -> bytes:
+    selected = (data or [])[:top_n]
+    width = 1500
+    row_height = 92
+    height = max(420, 145 + row_height * max(1, len(selected)))
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = _official_report_font(42, bold=True)
+    label_font = _official_report_font(25)
+    value_font = _official_report_font(25, bold=True)
+    note_font = _official_report_font(21)
+
+    draw.text((58, 34), title, fill="#35434b", font=title_font)
+    if not selected:
+        draw.text((60, 120), "Sin información disponible para este periodo.", fill="#748087", font=note_font)
+        out = io.BytesIO(); image.save(out, format="PNG"); return out.getvalue()
+
+    max_value = max(value for _, value in selected) or 1
+    label_x = 58
+    bar_x = 570
+    max_bar_width = 760
+    y = 120
+    for label, value in selected:
+        clean = re.sub(r"\s+", " ", str(label)).strip()
+        display = clean if len(clean) <= 38 else clean[:35].rstrip() + "..."
+        draw.text((label_x, y + 15), display, fill="#35434b", font=label_font)
+        draw.rounded_rectangle((bar_x, y + 11, bar_x + max_bar_width, y + 50), radius=18, fill="#edf2f4")
+        bar_width = max(10, int(max_bar_width * value / max_value))
+        draw.rounded_rectangle((bar_x, y + 11, bar_x + bar_width, y + 50), radius=18, fill=accent)
+        draw.text((bar_x + max_bar_width + 28, y + 14), str(value), fill="#35434b", font=value_font)
+        y += row_height
+
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _official_month_report_charts(rows: list[dict]) -> list[tuple[str, bytes]]:
+    return [
+        ("Principales destinatarios", _official_report_chart(
+            "Principales destinatarios",
+            _official_report_counts(rows, "destinatario", "Sin destinatario"),
+            "#173b63",
+        )),
+        ("Dependencias destinatarias", _official_report_chart(
+            "Dependencias destinatarias",
+            _official_report_counts(rows, "dependencia", "Sin dependencia"),
+            "#16ad8f",
+        )),
+        ("Solicitado por", _official_report_chart(
+            "Solicitado por",
+            _official_report_counts(rows, "solicitado_por", "Sin solicitante"),
+            "#6750a4",
+        )),
+        ("Temas", _official_report_chart(
+            "Temas de los oficios",
+            _official_report_theme_counts(rows),
+            "#f68b08",
+        )),
+    ]
+
+
+def _official_month_report_bullets(rows: list[dict], year: int, month_name: str) -> list[str]:
+    total = len(rows)
+    recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
+    dependencies = _official_report_counts(rows, "dependencia", "Sin dependencia")
+    requesters = _official_report_counts(rows, "solicitado_por", "Sin solicitante")
+    themes = _official_report_theme_counts(rows)
+
+    unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+    unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+    unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+    top_recipient = recipients[0] if recipients else ("Sin información", 0)
+    top_dependency = dependencies[0] if dependencies else ("Sin información", 0)
+    top_requester = requesters[0] if requesters else ("Sin información", 0)
+    top_theme = themes[0] if themes else ("Sin información", 0)
+    top3_themes = sum(value for _, value in themes[:3])
+    theme_share = (top3_themes / total * 100) if total else 0.0
+
+    return [
+        f"Durante {month_name} de {year} se registraron {total} oficios de la Dirección General.",
+        f"La correspondencia se distribuyó entre {unique_recipients} destinatarios y {unique_dependencies} dependencias u organizaciones distintas.",
+        f"El destinatario con mayor número de oficios fue {top_recipient[0]}, con {top_recipient[1]} registro(s) en el mes.",
+        f"La dependencia con mayor recepción fue {top_dependency[0]}, con {top_dependency[1]} oficio(s).",
+        f"Se identificaron {unique_requesters} solicitantes internos; {top_requester[0]} concentró el mayor número de solicitudes ({top_requester[1]}).",
+        f"El tema con mayor presencia fue {top_theme[0]} ({top_theme[1]} oficio(s)); los tres temas principales concentraron {theme_share:.1f}% del total mensual.",
+    ]
+
+
+def _official_month_report_docx(rows: list[dict], year: int, month_name: str) -> bytes:
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(.65)
+    section.bottom_margin = Inches(.65)
+    section.left_margin = Inches(.72)
+    section.right_margin = Inches(.72)
+
+    normal = doc.styles["Normal"]
+    normal.font.name = "Arial"
+    normal.font.size = Pt(10.5)
+    normal.paragraph_format.space_after = Pt(6)
+
+    logo = Path("assets/logo_coinvierte.jpeg")
+    if logo.exists():
+        paragraph = doc.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.add_run().add_picture(str(logo), width=Inches(5.7))
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run(f"INFORME MENSUAL DE OFICIOS\n{month_name.upper()} {year}")
+    run.bold = True
+    run.font.size = Pt(17)
+    run.font.color.rgb = RGBColor(53, 67, 75)
+
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = subtitle.add_run("Dirección General · COINVIERTE")
+    r.italic = True
+    r.font.color.rgb = RGBColor(103, 80, 164)
+
+    recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
+    dependencies = _official_report_counts(rows, "dependencia", "Sin dependencia")
+    requesters = _official_report_counts(rows, "solicitado_por", "Sin solicitante")
+    unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+    unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+    unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+    doc.add_heading("Numeralia del mes", level=1)
+    table = doc.add_table(rows=2, cols=4)
+    table.style = "Table Grid"
+    values = [
+        ("Oficios registrados", len(rows)),
+        ("Destinatarios únicos", unique_recipients),
+        ("Dependencias únicas", unique_dependencies),
+        ("Solicitado por", unique_requesters),
+    ]
+    for col, (label, value) in enumerate(values):
+        table.cell(0, col).text = label
+        table.cell(1, col).text = str(value)
+        table.cell(0, col).paragraphs[0].runs[0].bold = True
+        table.cell(1, col).paragraphs[0].runs[0].bold = True
+
+    doc.add_heading("Lectura ejecutiva", level=1)
+    for bullet in _official_month_report_bullets(rows, year, month_name):
+        doc.add_paragraph(bullet, style="List Bullet")
+
+    doc.add_heading("Estadísticas y distribución", level=1)
+    for chart_title, chart_bytes in _official_month_report_charts(rows):
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(io.BytesIO(chart_bytes), width=Inches(6.35))
+        caption = doc.add_paragraph(chart_title)
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if caption.runs:
+            caption.runs[0].italic = True
+            caption.runs[0].font.size = Pt(9)
+            caption.runs[0].font.color.rgb = RGBColor(116, 128, 135)
+
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.add_run(f"COINVIERTE · Informe mensual de oficios · {month_name} {year}").font.size = Pt(8)
+
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
+def _official_month_report_pdf(rows: list[dict], year: int, month_name: str) -> bytes:
+    output = io.BytesIO()
+    pdf = SimpleDocTemplate(
+        output, pagesize=letter,
+        leftMargin=.62 * inch, rightMargin=.62 * inch,
+        topMargin=.55 * inch, bottomMargin=.62 * inch,
+    )
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle(
+        "official_report_body", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=9.6, leading=13, textColor=colors.HexColor("#35434B"), spaceAfter=5,
+    )
+    heading = ParagraphStyle(
+        "official_report_heading", parent=body, fontName="Helvetica-Bold",
+        fontSize=13, leading=16, textColor=colors.HexColor("#173B63"),
+        spaceBefore=10, spaceAfter=7,
+    )
+    title_style = ParagraphStyle(
+        "official_report_title", parent=body, fontName="Helvetica-Bold",
+        fontSize=16, leading=20, alignment=TA_CENTER, textColor=colors.HexColor("#35434B"),
+        spaceAfter=5,
+    )
+    centered = ParagraphStyle(
+        "official_report_center", parent=body, alignment=TA_CENTER,
+        textColor=colors.HexColor("#6750A4"), spaceAfter=10,
+    )
+
+    story = []
+    logo = Path("assets/logo_coinvierte.jpeg")
+    if logo.exists():
+        story.extend([RLImage(str(logo), width=5.45 * inch, height=1.05 * inch), Spacer(1, 4)])
+    story.append(Paragraph(html.escape(f"INFORME MENSUAL DE OFICIOS · {month_name.upper()} {year}"), title_style))
+    story.append(Paragraph("Dirección General · COINVIERTE", centered))
+
+    recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
+    dependencies = _official_report_counts(rows, "dependencia", "Sin dependencia")
+    requesters = _official_report_counts(rows, "solicitado_por", "Sin solicitante")
+    unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+    unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+    unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+    story.append(Paragraph("Numeralia del mes", heading))
+    metric_data = [
+        [Paragraph("<b>Oficios registrados</b>", body), Paragraph("<b>Destinatarios únicos</b>", body), Paragraph("<b>Dependencias únicas</b>", body), Paragraph("<b>Solicitado por</b>", body)],
+        [Paragraph(str(len(rows)), title_style), Paragraph(str(unique_recipients), title_style), Paragraph(str(unique_dependencies), title_style), Paragraph(str(unique_requesters), title_style)],
+    ]
+    metric_table = Table(metric_data, colWidths=[1.65 * inch] * 4)
+    metric_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), .35, colors.HexColor("#DDE4E6")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F6")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([metric_table, Spacer(1, 8)])
+
+    story.append(Paragraph("Lectura ejecutiva", heading))
+    for bullet in _official_month_report_bullets(rows, year, month_name):
+        story.append(Paragraph(html.escape(bullet), body, bulletText="•"))
+
+    story.append(Paragraph("Estadísticas y distribución", heading))
+    for chart_title, chart_bytes in _official_month_report_charts(rows):
+        chart = RLImage(io.BytesIO(chart_bytes), width=6.65 * inch, height=3.35 * inch)
+        story.extend([chart, Paragraph(html.escape(chart_title), centered), Spacer(1, 5)])
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#748087"))
+        canvas.drawString(.62 * inch, .34 * inch, f"COINVIERTE · {month_name} {year}")
+        canvas.drawRightString(7.88 * inch, .34 * inch, f"Página {doc.page}")
+        canvas.restoreState()
+
+    pdf.build(story, onFirstPage=footer, onLaterPages=footer)
+    return output.getvalue()
+
+
+def _official_list_xlsx(list_rows: list[dict]) -> bytes:
+    frame = pd.DataFrame(list_rows)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        frame.to_excel(writer, index=False, sheet_name="Oficios")
+        worksheet = writer.book["Oficios"]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for column_cells in worksheet.columns:
+            max_length = max(len(str(cell.value or "")) for cell in column_cells)
+            width = min(max(max_length + 2, 12), 42)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = width
+        for cell in worksheet[1]:
+            cell.font = cell.font.copy(bold=True)
+    return output.getvalue()
+
+
 def official_letters_month(year: int, month: int, month_name: str):
     top1, top2 = st.columns([1, 5])
     top1.button(
@@ -3903,11 +4200,11 @@ def official_letters_month(year: int, month: int, month_name: str):
     )
     st.markdown(metrics_html, unsafe_allow_html=True)
 
-    # Selector de vista
     if "official_list_mode" not in st.session_state:
         st.session_state.official_list_mode = False
 
-    mode_col, _ = st.columns([1.4, 4.6])
+    report_key = f"official_month_report_open_{year}_{month}"
+    mode_col, report_col, _ = st.columns([1.4, 1.4, 3.2])
     if st.session_state.official_list_mode:
         if mode_col.button("Vista modo tarjetas", key=f"official_cards_mode_{year}_{month}",
                            use_container_width=True, type="primary"):
@@ -3918,6 +4215,51 @@ def official_letters_month(year: int, month: int, month_name: str):
                            use_container_width=True, type="primary"):
             st.session_state.official_list_mode = True
             st.rerun()
+
+    if report_col.button("Informe mensual", key=f"official_month_report_{year}_{month}",
+                         use_container_width=True, type="primary"):
+        st.session_state[report_key] = not bool(st.session_state.get(report_key, False))
+        st.rerun()
+
+    if st.session_state.get(report_key):
+        with st.container(border=True):
+            h1, h2 = st.columns([5, 1])
+            h1.markdown(f"### Informe mensual · {month_name} {year}")
+            if h2.button("Cerrar", key=f"close_official_month_report_{year}_{month}", use_container_width=True):
+                st.session_state[report_key] = False
+                st.rerun()
+
+            bullets = _official_month_report_bullets(rows, year, month_name)
+            st.markdown("#### Lectura ejecutiva")
+            for bullet in bullets:
+                st.markdown(f"- {bullet}")
+
+            st.markdown("#### Gráficas incluidas")
+            preview_charts = _official_month_report_charts(rows)
+            chart_columns = st.columns(2)
+            for index, (chart_title, chart_bytes) in enumerate(preview_charts):
+                chart_columns[index % 2].image(chart_bytes, caption=chart_title, use_container_width=True)
+
+            with st.spinner("Preparando Word y PDF del informe..."):
+                report_docx = _official_month_report_docx(rows, year, month_name)
+                report_pdf = _official_month_report_pdf(rows, year, month_name)
+            safe_month = re.sub(r"[^A-Za-z0-9]+", "_", month_name).strip("_")
+            d1, d2, _ = st.columns([1.3, 1.3, 3.4])
+            d1.download_button(
+                "Descargar Word", report_docx,
+                file_name=f"Informe_Oficios_DG_{safe_month}_{year}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key=f"download_official_month_docx_{year}_{month}",
+            )
+            d2.download_button(
+                "Descargar PDF", report_pdf,
+                file_name=f"Informe_Oficios_DG_{safe_month}_{year}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"download_official_month_pdf_{year}_{month}",
+            )
+            st.caption("El informe mensual usa todos los oficios del mes y no se modifica por el buscador de la vista.")
 
     term = st.text_input(
         "Buscar dentro del mes",
@@ -3951,17 +4293,19 @@ def official_letters_month(year: int, month: int, month_name: str):
     if st.session_state.official_list_mode:
         list_rows = []
         for row in filtered:
+            classification = _classify_official_letter(row)
             list_rows.append({
                 "Número de oficio": row.get("numero_oficio") or "Sin número",
                 "Título / asunto": row.get("asunto") or "Sin asunto",
                 "Mes": f"{month_name} {year}",
                 "Destinatario": row.get("destinatario") or "Sin destinatario",
                 "Dependencia / organización destinataria": row.get("dependencia") or "Sin información",
-                "Tema": row.get("tema") or _classify_official_letter(row).get("tema") or "Otros / por clasificar",
-                "Subtema": row.get("subtema") or _classify_official_letter(row).get("subtema") or "Sin subtema",
+                "Tema": row.get("tema") or classification.get("tema") or "Otros / por clasificar",
+                "Subtema": row.get("subtema") or classification.get("subtema") or "Sin subtema",
             })
+        list_frame = pd.DataFrame(list_rows)
         st.dataframe(
-            pd.DataFrame(list_rows),
+            list_frame,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -3974,6 +4318,18 @@ def official_letters_month(year: int, month: int, month_name: str):
                 ),
             },
         )
+        xlsx_bytes = _official_list_xlsx(list_rows)
+        safe_month = re.sub(r"[^A-Za-z0-9]+", "_", month_name).strip("_")
+        x1, _ = st.columns([1.5, 4.5])
+        x1.download_button(
+            "Descargar Excel (.xlsx)", xlsx_bytes,
+            file_name=f"Oficios_DG_{safe_month}_{year}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"download_official_list_xlsx_{year}_{month}",
+            use_container_width=True,
+        )
+        if term:
+            st.caption("El Excel incluye únicamente los registros que coinciden con el filtro actual.")
         st.caption("Para abrir el expediente de un oficio o adjuntar el firmado, cambia a Vista modo tarjetas.")
     else:
         for row in filtered:
