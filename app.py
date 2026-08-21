@@ -3898,6 +3898,7 @@ def _official_report_font(size: int, bold: bool = False):
 
 def _official_report_chart(title: str, data: list[tuple[str, int]], accent: str, top_n: int = 8) -> bytes:
     selected = (data or [])[:top_n]
+    total_value = sum(value for _, value in (data or [])) or 0
     width = 1500
     row_height = 92
     height = max(420, 145 + row_height * max(1, len(selected)))
@@ -3925,7 +3926,9 @@ def _official_report_chart(title: str, data: list[tuple[str, int]], accent: str,
         draw.rounded_rectangle((bar_x, y + 11, bar_x + max_bar_width, y + 50), radius=18, fill="#edf2f4")
         bar_width = max(10, int(max_bar_width * value / max_value))
         draw.rounded_rectangle((bar_x, y + 11, bar_x + bar_width, y + 50), radius=18, fill=accent)
-        draw.text((bar_x + max_bar_width + 28, y + 14), str(value), fill="#35434b", font=value_font)
+        percentage = (value / total_value * 100) if total_value else 0.0
+        value_label = f"{value} ({percentage:.1f}%)"
+        draw.text((bar_x + max_bar_width + 28, y + 14), value_label, fill="#35434b", font=value_font)
         y += row_height
 
     out = io.BytesIO()
@@ -4840,6 +4843,11 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 .transform_filter(req_sel)
                 .transform_filter(theme_sel)
                 .transform_aggregate(Oficios="distinct(OficioID)", groupby=["Mes"])
+                .transform_joinaggregate(TotalPeriodo="sum(Oficios)")
+                .transform_calculate(
+                    Porcentaje="datum.TotalPeriodo > 0 ? datum.Oficios / datum.TotalPeriodo * 100 : 0",
+                    ValorEtiqueta="format(datum.Oficios, '.0f') + ' (' + format(datum.Porcentaje, '.1f') + '%)'",
+                )
             )
             month_bars = (
                 month_base.mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=54)
@@ -4861,14 +4869,14 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                         alt.value("#c3cbd1"),
                     ),
                     opacity=alt.condition(month_sel | month_hover, alt.value(1), alt.value(0.8)),
-                    tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f")],
+                    tooltip=[alt.Tooltip("Mes:N"), alt.Tooltip("Oficios:Q", format=".0f"), alt.Tooltip("Porcentaje:Q", title="Participación", format=".1f")],
                 )
                 .add_params(month_sel, month_hover)
             )
             month_labels = month_base.mark_text(dy=-10, fontSize=12, fontWeight="bold", color="#35434b").encode(
                 x=alt.X("Mes:N", sort=month_order),
                 y="Oficios:Q",
-                text=alt.Text("Oficios:Q", format=".0f"),
+                text="ValorEtiqueta:N",
             )
             month_chart = (
                 month_bars + month_labels
@@ -4896,6 +4904,11 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 chart = (
                     chart
                     .transform_aggregate(Oficios="distinct(OficioID)", groupby=[field])
+                    .transform_joinaggregate(TotalPeriodo="sum(Oficios)")
+                    .transform_calculate(
+                        Porcentaje="datum.TotalPeriodo > 0 ? datum.Oficios / datum.TotalPeriodo * 100 : 0",
+                        ValorEtiqueta="format(datum.Oficios, '.0f') + ' (' + format(datum.Porcentaje, '.1f') + '%)'",
+                    )
                     .transform_window(
                         rank="rank()",
                         sort=[alt.SortField("Oficios", order="descending")],
@@ -4937,6 +4950,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                         tooltip=[
                             alt.Tooltip(f"{field}:N", title=field),
                             alt.Tooltip("Oficios:Q", format=".0f"),
+                            alt.Tooltip("Porcentaje:Q", title="Participación", format=".1f"),
                         ],
                     )
                     .add_params(selection, hover)
@@ -4977,7 +4991,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                     .encode(
                         y=y_encoding,
                         x="Oficios:Q",
-                        text=alt.Text("Oficios:Q", format=".0f"),
+                        text="ValorEtiqueta:N",
                     )
                 )
 
@@ -5088,6 +5102,11 @@ def _official_letters_analytics(year: int, rows: list[dict]):
     theme_df = pd.DataFrame(
         [{"Tema": key, "Oficios": value} for key, value in theme_counts.items()]
     ).sort_values(["Oficios", "Tema"], ascending=[False, True])
+    if not theme_df.empty:
+        theme_df["Porcentaje"] = theme_df["Oficios"] / max(len(active_rows), 1) * 100
+        theme_df["Valor"] = theme_df.apply(
+            lambda r: f"{int(r['Oficios'])} ({float(r['Porcentaje']):.1f}%)", axis=1
+        )
 
     if not theme_df.empty:
         ordered_themes = theme_df["Tema"].tolist()[::-1]
@@ -5101,6 +5120,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
                 tooltip=[
                     alt.Tooltip("Tema:N"),
                     alt.Tooltip("Oficios:Q", format=".0f"),
+                    alt.Tooltip("Porcentaje:Q", title="Participación", format=".1f"),
                 ],
             )
         )
@@ -5110,7 +5130,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             .encode(
                 y=alt.Y("Tema:N", sort=ordered_themes),
                 x="Oficios:Q",
-                text=alt.Text("Oficios:Q", format=".0f"),
+                text="Valor:N",
             )
         )
         st.altair_chart((theme_chart + theme_labels).properties(height=460), use_container_width=True)
@@ -5150,10 +5170,48 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             })
         theme_month_df = pd.DataFrame(theme_monthly)
 
+        def _labeled_theme_chart(frame: pd.DataFrame, category: str, total_base: int, horizontal: bool = True):
+            if frame.empty:
+                return None
+            data = frame.copy()
+            data["Porcentaje"] = data["Oficios"] / max(total_base, 1) * 100
+            data["Valor"] = data.apply(
+                lambda r: f"{int(r['Oficios'])} ({float(r['Porcentaje']):.1f}%)", axis=1
+            )
+            if horizontal:
+                order = data.sort_values("Oficios", ascending=True)[category].tolist()
+                bars = alt.Chart(data).mark_bar(cornerRadiusEnd=7).encode(
+                    y=alt.Y(f"{category}:N", sort=order, title=None, axis=alt.Axis(labelLimit=230)),
+                    x=alt.X("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                    tooltip=[
+                        alt.Tooltip(f"{category}:N", title=category),
+                        alt.Tooltip("Oficios:Q", format=".0f"),
+                        alt.Tooltip("Porcentaje:Q", title="Participación", format=".1f"),
+                    ],
+                )
+                labels = alt.Chart(data).mark_text(align="left", baseline="middle", dx=5, fontWeight="bold").encode(
+                    y=alt.Y(f"{category}:N", sort=order), x="Oficios:Q", text="Valor:N"
+                )
+                return (bars + labels).properties(height=max(220, min(390, len(data) * 32 + 50)))
+            order = [name for _, name in MONTHS_ES]
+            bars = alt.Chart(data).mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7).encode(
+                x=alt.X(f"{category}:N", sort=order, title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Oficios:Q", title="Número de oficios", axis=alt.Axis(tickMinStep=1)),
+                tooltip=[
+                    alt.Tooltip(f"{category}:N", title=category),
+                    alt.Tooltip("Oficios:Q", format=".0f"),
+                    alt.Tooltip("Porcentaje:Q", title="Participación", format=".1f"),
+                ],
+            )
+            labels = alt.Chart(data).mark_text(dy=-9, fontWeight="bold").encode(
+                x=alt.X(f"{category}:N", sort=order), y="Oficios:Q", text="Valor:N"
+            )
+            return (bars + labels).properties(height=300)
+
         left_theme, right_theme = st.columns(2, gap="large")
         with left_theme:
             st.markdown("### Evolución mensual")
-            st.bar_chart(theme_month_df.set_index("Mes")["Oficios"], use_container_width=True)
+            st.altair_chart(_labeled_theme_chart(theme_month_df, "Mes", theme_total, horizontal=False), use_container_width=True)
 
             sub_counts = {}
             for row in selected_rows:
@@ -5166,7 +5224,7 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             if sub_df.empty:
                 st.info("No hay subtemas para esta categoría.")
             else:
-                st.bar_chart(sub_df.set_index("Subtema")["Oficios"], use_container_width=True)
+                st.altair_chart(_labeled_theme_chart(sub_df, "Subtema", theme_total), use_container_width=True)
 
         with right_theme:
             st.markdown("### Principales destinatarios")
@@ -5174,20 +5232,14 @@ def _official_letters_analytics(year: int, rows: list[dict]):
             if selected_recipients.empty:
                 st.info("No hay destinatarios para este tema.")
             else:
-                st.bar_chart(
-                    selected_recipients.set_index("Etiqueta")["Oficios"],
-                    use_container_width=True,
-                )
+                st.altair_chart(_labeled_theme_chart(selected_recipients, "Etiqueta", theme_total), use_container_width=True)
 
             st.markdown("### Solicitado por")
             selected_requesters = _official_group_counts(selected_rows, "solicitado_por", "Sin dato").head(10)
             if selected_requesters.empty:
                 st.info("No hay información de 'Solicitado por' para este tema.")
             else:
-                st.bar_chart(
-                    selected_requesters.set_index("Etiqueta")["Oficios"],
-                    use_container_width=True,
-                )
+                st.altair_chart(_labeled_theme_chart(selected_requesters, "Etiqueta", theme_total), use_container_width=True)
 
 
     # Tarjeta independiente de cancelados.
