@@ -20,6 +20,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from pptx import Presentation
 from pypdf import PdfReader
@@ -3956,6 +3958,248 @@ def _official_month_report_charts(rows: list[dict]) -> list[tuple[str, bytes]]:
     ]
 
 
+def _official_annual_report_charts(rows: list[dict]) -> list[tuple[str, bytes]]:
+    month_counts = []
+    for month, month_name in MONTHS_ES:
+        count = sum(1 for row in rows if int(row.get("mes") or 0) == month)
+        month_counts.append((month_name, count))
+    return [
+        ("Volumen mensual", _official_report_chart(
+            "Volumen mensual de oficios", month_counts, "#0798cf", top_n=12
+        )),
+        ("Principales destinatarios", _official_report_chart(
+            "Principales destinatarios",
+            _official_report_counts(rows, "destinatario", "Sin destinatario"),
+            "#173b63",
+        )),
+        ("Dependencias destinatarias", _official_report_chart(
+            "Dependencias destinatarias",
+            _official_report_counts(rows, "dependencia", "Sin dependencia"),
+            "#16ad8f",
+        )),
+        ("Solicitado por", _official_report_chart(
+            "Solicitado por",
+            _official_report_counts(rows, "solicitado_por", "Sin solicitante"),
+            "#6750a4",
+        )),
+        ("Temas", _official_report_chart(
+            "Temas de los oficios",
+            _official_report_theme_counts(rows),
+            "#f68b08",
+        )),
+    ]
+
+
+def _official_annual_report_bullets(rows: list[dict], year: int) -> list[str]:
+    total = len(rows)
+    recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
+    dependencies = _official_report_counts(rows, "dependencia", "Sin dependencia")
+    requesters = _official_report_counts(rows, "solicitado_por", "Sin solicitante")
+    themes = _official_report_theme_counts(rows)
+
+    unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+    unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+    unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+    month_counts = []
+    for month, month_name in MONTHS_ES:
+        count = sum(1 for row in rows if int(row.get("mes") or 0) == month)
+        month_counts.append((month_name, count))
+    top_month = max(month_counts, key=lambda item: item[1]) if month_counts else ("Sin información", 0)
+    months_with_activity = sum(1 for _, value in month_counts if value > 0)
+    average = (total / months_with_activity) if months_with_activity else 0.0
+
+    top_recipient = recipients[0] if recipients else ("Sin información", 0)
+    top_dependency = dependencies[0] if dependencies else ("Sin información", 0)
+    top_requester = requesters[0] if requesters else ("Sin información", 0)
+    top_theme = themes[0] if themes else ("Sin información", 0)
+    top3_themes = sum(value for _, value in themes[:3])
+    theme_share = (top3_themes / total * 100) if total else 0.0
+
+    return [
+        f"Durante {year} se registraron {total} oficios de la Dirección General, con actividad en {months_with_activity} mes(es) del año.",
+        f"El mayor volumen mensual se observó en {top_month[0]}, con {top_month[1]} oficio(s); el promedio entre los meses con actividad fue de {average:.1f} oficios.",
+        f"La correspondencia anual se distribuyó entre {unique_recipients} destinatarios y {unique_dependencies} dependencias u organizaciones distintas.",
+        f"El destinatario con mayor número de oficios fue {top_recipient[0]} ({top_recipient[1]}), mientras que {top_dependency[0]} fue la dependencia con mayor recepción ({top_dependency[1]}).",
+        f"Se identificaron {unique_requesters} solicitantes internos; {top_requester[0]} concentró el mayor número de solicitudes ({top_requester[1]}).",
+        f"El tema con mayor presencia fue {top_theme[0]} ({top_theme[1]} oficio(s)); los tres temas principales concentraron {theme_share:.1f}% del total anual.",
+    ]
+
+
+def _word_add_page_number(paragraph):
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run(" · Página ")
+    run.font.size = Pt(8)
+    fld_char1 = OxmlElement("w:fldChar")
+    fld_char1.set(qn("w:fldCharType"), "begin")
+    instr_text = OxmlElement("w:instrText")
+    instr_text.set(qn("xml:space"), "preserve")
+    instr_text.text = " PAGE "
+    fld_char2 = OxmlElement("w:fldChar")
+    fld_char2.set(qn("w:fldCharType"), "end")
+    run._r.append(fld_char1)
+    run._r.append(instr_text)
+    run._r.append(fld_char2)
+
+
+def _official_annual_report_docx(rows: list[dict], year: int) -> bytes:
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(.65)
+    section.bottom_margin = Inches(.65)
+    section.left_margin = Inches(.72)
+    section.right_margin = Inches(.72)
+
+    normal = doc.styles["Normal"]
+    normal.font.name = "Arial"
+    normal.font.size = Pt(10.5)
+    normal.paragraph_format.space_after = Pt(6)
+
+    logo = Path("assets/logo_coinvierte.jpeg")
+    if logo.exists():
+        paragraph = doc.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.add_run().add_picture(str(logo), width=Inches(5.7))
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run(f"INFORME ANUAL DE OFICIOS\n{year}")
+    run.bold = True
+    run.font.size = Pt(17)
+    run.font.color.rgb = RGBColor(53, 67, 75)
+
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = subtitle.add_run("Dirección General · COINVIERTE")
+    r.italic = True
+    r.font.color.rgb = RGBColor(103, 80, 164)
+
+    recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
+    dependencies = _official_report_counts(rows, "dependencia", "Sin dependencia")
+    requesters = _official_report_counts(rows, "solicitado_por", "Sin solicitante")
+    unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+    unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+    unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+    doc.add_heading("Numeralia del año", level=1)
+    table = doc.add_table(rows=2, cols=4)
+    table.style = "Table Grid"
+    values = [
+        ("Oficios registrados", len(rows)),
+        ("Destinatarios únicos", unique_recipients),
+        ("Dependencias únicas", unique_dependencies),
+        ("Solicitado por", unique_requesters),
+    ]
+    for col, (label, value) in enumerate(values):
+        table.cell(0, col).text = label
+        table.cell(1, col).text = str(value)
+        table.cell(0, col).paragraphs[0].runs[0].bold = True
+        table.cell(1, col).paragraphs[0].runs[0].bold = True
+
+    doc.add_heading("Lectura ejecutiva", level=1)
+    for bullet in _official_annual_report_bullets(rows, year):
+        doc.add_paragraph(bullet, style="List Bullet")
+
+    doc.add_heading("Estadísticas y distribución", level=1)
+    for chart_title, chart_bytes in _official_annual_report_charts(rows):
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(io.BytesIO(chart_bytes), width=Inches(6.35))
+        caption = doc.add_paragraph(chart_title)
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if caption.runs:
+            caption.runs[0].italic = True
+            caption.runs[0].font.size = Pt(9)
+            caption.runs[0].font.color.rgb = RGBColor(116, 128, 135)
+
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.add_run(f"COINVIERTE · Informe anual de oficios · {year}").font.size = Pt(8)
+    _word_add_page_number(footer)
+
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
+def _official_annual_report_pdf(rows: list[dict], year: int) -> bytes:
+    output = io.BytesIO()
+    pdf = SimpleDocTemplate(
+        output, pagesize=letter,
+        leftMargin=.62 * inch, rightMargin=.62 * inch,
+        topMargin=.55 * inch, bottomMargin=.62 * inch,
+    )
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle(
+        "official_annual_body", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=9.6, leading=13, textColor=colors.HexColor("#35434B"), spaceAfter=5,
+    )
+    heading = ParagraphStyle(
+        "official_annual_heading", parent=body, fontName="Helvetica-Bold",
+        fontSize=13, leading=16, textColor=colors.HexColor("#173B63"),
+        spaceBefore=10, spaceAfter=7,
+    )
+    title_style = ParagraphStyle(
+        "official_annual_title", parent=body, fontName="Helvetica-Bold",
+        fontSize=16, leading=20, alignment=TA_CENTER, textColor=colors.HexColor("#35434B"),
+        spaceAfter=5,
+    )
+    centered = ParagraphStyle(
+        "official_annual_center", parent=body, alignment=TA_CENTER,
+        textColor=colors.HexColor("#6750A4"), spaceAfter=10,
+    )
+
+    story = []
+    logo = Path("assets/logo_coinvierte.jpeg")
+    if logo.exists():
+        story.extend([RLImage(str(logo), width=5.45 * inch, height=1.05 * inch), Spacer(1, 4)])
+    story.append(Paragraph(html.escape(f"INFORME ANUAL DE OFICIOS · {year}"), title_style))
+    story.append(Paragraph("Dirección General · COINVIERTE", centered))
+
+    recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
+    dependencies = _official_report_counts(rows, "dependencia", "Sin dependencia")
+    requesters = _official_report_counts(rows, "solicitado_por", "Sin solicitante")
+    unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+    unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+    unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+    story.append(Paragraph("Numeralia del año", heading))
+    metric_data = [
+        [Paragraph("<b>Oficios registrados</b>", body), Paragraph("<b>Destinatarios únicos</b>", body), Paragraph("<b>Dependencias únicas</b>", body), Paragraph("<b>Solicitado por</b>", body)],
+        [Paragraph(str(len(rows)), title_style), Paragraph(str(unique_recipients), title_style), Paragraph(str(unique_dependencies), title_style), Paragraph(str(unique_requesters), title_style)],
+    ]
+    metric_table = Table(metric_data, colWidths=[1.65 * inch] * 4)
+    metric_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), .35, colors.HexColor("#DDE4E6")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F6")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([metric_table, Spacer(1, 8)])
+
+    story.append(Paragraph("Lectura ejecutiva", heading))
+    for bullet in _official_annual_report_bullets(rows, year):
+        story.append(Paragraph(html.escape(bullet), body, bulletText="•"))
+
+    story.append(Paragraph("Estadísticas y distribución", heading))
+    for chart_title, chart_bytes in _official_annual_report_charts(rows):
+        chart = RLImage(io.BytesIO(chart_bytes), width=6.65 * inch, height=3.35 * inch)
+        story.extend([chart, Paragraph(html.escape(chart_title), centered), Spacer(1, 5)])
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#748087"))
+        canvas.drawString(.62 * inch, .34 * inch, f"COINVIERTE · Informe anual de oficios · {year}")
+        canvas.drawRightString(7.88 * inch, .34 * inch, f"Página {doc.page}")
+        canvas.restoreState()
+
+    pdf.build(story, onFirstPage=footer, onLaterPages=footer)
+    return output.getvalue()
+
+
 def _official_month_report_bullets(rows: list[dict], year: int, month_name: str) -> list[str]:
     total = len(rows)
     recipients = _official_report_counts(rows, "destinatario", "Sin destinatario")
@@ -5023,7 +5267,7 @@ def official_letters_year(year: int):
 
     active_rows_year = _official_active_rows(rows)
 
-    months_tab, analytics_tab = st.tabs(["Meses", "Analítica"])
+    months_tab, analytics_tab, annual_report_tab = st.tabs(["Meses", "Analítica", "Informe anual"])
 
     with months_tab:
         st.markdown(
@@ -5068,6 +5312,62 @@ def official_letters_year(year: int):
             st.info(f"No hay oficios registrados para {year}.")
         else:
             _official_letters_analytics(year, rows)
+
+    with annual_report_tab:
+        if not configured():
+            st.info("El informe anual estará disponible al conectar Supabase.")
+        elif not active_rows_year:
+            st.info(f"No hay oficios registrados para {year}.")
+        else:
+            st.markdown(f"### Informe anual · {year}")
+            st.caption("Integra todos los oficios vigentes del año, con numeralia, lectura ejecutiva, gráficas y paginación.")
+
+            recipients = _official_report_counts(active_rows_year, "destinatario", "Sin destinatario")
+            dependencies = _official_report_counts(active_rows_year, "dependencia", "Sin dependencia")
+            requesters = _official_report_counts(active_rows_year, "solicitado_por", "Sin solicitante")
+            unique_recipients = sum(1 for label, _ in recipients if label != "Sin destinatario")
+            unique_dependencies = sum(1 for label, _ in dependencies if label != "Sin dependencia")
+            unique_requesters = sum(1 for label, _ in requesters if label != "Sin solicitante")
+
+            st.markdown(
+                '<div class="metric-grid">'
+                f'<div class="metric-box metric-blue"><div class="metric-label">Oficios registrados</div><div class="metric-value">{len(active_rows_year)}</div></div>'
+                f'<div class="metric-box metric-green"><div class="metric-label">Destinatarios únicos</div><div class="metric-value">{unique_recipients}</div></div>'
+                f'<div class="metric-box metric-orange"><div class="metric-label">Dependencias únicas</div><div class="metric-value">{unique_dependencies}</div></div>'
+                f'<div class="metric-box metric-purple"><div class="metric-label">Solicitado por</div><div class="metric-value">{unique_requesters}</div></div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("#### Lectura ejecutiva")
+            for bullet in _official_annual_report_bullets(active_rows_year, year):
+                st.markdown(f"- {bullet}")
+
+            st.markdown("#### Gráficas incluidas")
+            annual_charts = _official_annual_report_charts(active_rows_year)
+            chart_columns = st.columns(2)
+            for index, (chart_title, chart_bytes) in enumerate(annual_charts):
+                chart_columns[index % 2].image(chart_bytes, caption=chart_title, use_container_width=True)
+
+            with st.spinner("Preparando Word y PDF del informe anual..."):
+                annual_docx = _official_annual_report_docx(active_rows_year, year)
+                annual_pdf = _official_annual_report_pdf(active_rows_year, year)
+            d1, d2, _ = st.columns([1.3, 1.3, 3.4])
+            d1.download_button(
+                "Descargar Word", annual_docx,
+                file_name=f"Informe_Anual_Oficios_DG_{year}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key=f"download_official_annual_docx_{year}",
+            )
+            d2.download_button(
+                "Descargar PDF", annual_pdf,
+                file_name=f"Informe_Anual_Oficios_DG_{year}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"download_official_annual_pdf_{year}",
+            )
+            st.caption("El informe anual considera todo el año y no se modifica por filtros de las vistas mensuales.")
 
 
 def official_letters():
