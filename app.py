@@ -1291,7 +1291,23 @@ def user_management():
                         "p_direcciones_proyectos": selected.get("direcciones_proyectos") or []}).execute().data
                     st.session_state.generated_code = result[0] if isinstance(result, list) else result
                     st.session_state.generated_email = selected["email"]
-                    st.success("Nuevo código generado. Consúltalo en la primera pestaña.")
+                    st.success("Nuevo código generado correctamente.")
+
+                # Mostrar el código inmediatamente en la misma ficha del usuario.
+                # El RPC invalida cualquier código anterior no utilizado para este correo,
+                # por lo que debe compartirse únicamente el código más reciente.
+                if (st.session_state.get("generated_code")
+                        and st.session_state.get("generated_email") == selected.get("email")):
+                    generated = st.session_state.generated_code
+                    with st.container(border=True):
+                        st.markdown("#### Código temporal vigente")
+                        st.caption(f"Usuario: {selected.get('nombre') or selected.get('email')} · {selected.get('email')}")
+                        st.code(generated.get("codigo", ""), language=None)
+                        st.caption(
+                            f"Vence: {generated.get('vence', '')}. "
+                            "Este es el código que debe usar en ‘Activar acceso con código’. "
+                            "Los códigos anteriores dejan de ser válidos al generar uno nuevo."
+                        )
                 st.divider()
                 confirm_remove = st.checkbox(f"Confirmo que deseo remover el acceso de {selected.get('nombre') or selected['email']}",
                                              key=f"confirm_remove_{selected['id']}")
