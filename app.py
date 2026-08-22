@@ -1325,8 +1325,8 @@ def audit_page():
         return
 
     frame = pd.DataFrame(rows)
-    frame["fecha_dt"] = pd.to_datetime(frame["fecha"], errors="coerce")
-    frame["fecha_local"] = frame["fecha_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    frame["fecha_dt"] = pd.to_datetime(frame["fecha"], errors="coerce", utc=True)
+    frame["fecha_local"] = frame["fecha_dt"].dt.tz_convert("America/Mexico_City").dt.strftime("%Y-%m-%d %H:%M:%S")
     frame["usuario"] = frame["usuario_nombre"].fillna("").astype(str).str.strip()
     frame.loc[frame["usuario"] == "", "usuario"] = frame["usuario_email"].fillna("")
     frame["accion"] = frame["accion"].fillna("").astype(str)
