@@ -338,6 +338,7 @@ def login():
             activation_email = st.text_input("Correo autorizado", placeholder="nombre@jalisco.gob.mx", key="activation_email")
             code = st.text_input("Código temporal", max_chars=8)
             new_password = st.text_input("Crea una contraseña", type="password", key="new_password")
+            st.caption("La contraseña debe tener al menos 10 caracteres e incluir mayúsculas, minúsculas y números.")
             confirm_password = st.text_input("Confirma la contraseña", type="password")
             activate = st.form_submit_button("Activar mi acceso", type="primary", use_container_width=True)
     if activate:
@@ -345,22 +346,47 @@ def login():
             st.error("Primero debes conectar Supabase.")
         elif not valid_official_email(activation_email):
             st.error("El correo debe pertenecer a @jalisco.gob.mx.")
-        elif len(new_password) < 8:
-            st.error("La contraseña debe tener al menos 8 caracteres.")
+        elif len(new_password) < 10:
+            st.error("La contraseña debe tener al menos 10 caracteres.")
+        elif not re.search(r"[A-Z]", new_password):
+            st.error("La contraseña debe incluir al menos una letra mayúscula.")
+        elif not re.search(r"[a-z]", new_password):
+            st.error("La contraseña debe incluir al menos una letra minúscula.")
+        elif not re.search(r"[0-9]", new_password):
+            st.error("La contraseña debe incluir al menos un número.")
         elif new_password != confirm_password:
             st.error("Las contraseñas no coinciden.")
         else:
             try:
-                auth = public_client().auth.sign_up({"email": activation_email.lower().strip(), "password": new_password})
-                redeemed = public_client().rpc("canjear_codigo_acceso", {"p_email": activation_email.lower().strip(),
-                                                                          "p_codigo": code.strip()}).execute().data
-                if not redeemed:
+                clean_email = activation_email.lower().strip()
+                clean_code = code.strip()
+
+                valid_code = public_client().rpc(
+                    "validar_codigo_acceso",
+                    {"p_email": clean_email, "p_codigo": clean_code},
+                ).execute().data
+
+                if not valid_code:
                     st.error("El código es incorrecto, ya fue utilizado o está vencido.")
                 else:
-                    if auth.session and auth.user:
+                    auth = public_client().auth.sign_up({
+                        "email": clean_email,
+                        "password": new_password,
+                    })
+                    redeemed = public_client().rpc(
+                        "canjear_codigo_acceso",
+                        {"p_email": clean_email, "p_codigo": clean_code},
+                    ).execute().data
+
+                    if not redeemed:
+                        st.error(
+                            "La cuenta fue creada, pero no fue posible completar la activación. "
+                            "Contacta al administrador."
+                        )
+                    elif auth.session and auth.user:
                         st.success("Acceso activado correctamente. Ya puedes ingresar.")
                     else:
-                        st.success("Acceso activado. Revisa tu correo si Supabase solicita confirmar la cuenta.")
+                        st.success("Acceso activado. Revisa tu correo para confirmar la cuenta.")
             except Exception as exc:
                 st.error(f"No fue posible activar el acceso: {exc}")
     if submitted:
