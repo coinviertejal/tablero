@@ -1290,36 +1290,157 @@ def view_active_projects(direction: str):
         st.rerun()
 
 
+
 def audit_page():
-    st.title("Auditoría")
+    """Visor de bitácora funcional. Sólo visible para el administrador maestro."""
     if not is_master_admin():
-        st.error("No tienes permisos para acceder a este módulo.")
+        st.error("No tienes permisos para consultar la auditoría.")
+        return
+
+    st.title("Auditoría")
+    st.caption("Bitácora funcional del Tablero COINVIERTE. Registra acciones relevantes realizadas dentro del aplicativo.")
+
+    if not configured():
+        st.error("Primero debes conectar Supabase.")
         return
 
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
-    st.caption("Diagnóstico de la bitácora funcional del Tablero COINVIERTE.")
-    if st.button("Probar bitácora", key="test_audit_log_button", use_container_width=True, type="primary"):
-        user = st.session_state.get("user", {}) or {}
-        try:
-            response = client.rpc(
-                "registrar_evento_auditoria",
-                {
-                    "p_usuario_email": user.get("email"),
-                    "p_usuario_nombre": user.get("nombre") or user.get("email"),
-                    "p_modulo": "Seguridad",
-                    "p_accion": "TEST",
-                    "p_entidad": "bitacora_auditoria",
-                    "p_registro_id": None,
-                    "p_descripcion": "Prueba manual de bitácora desde Tablero COINVIERTE",
-                    "p_datos_anteriores": None,
-                    "p_datos_nuevos": None,
-                    "p_metadata": {"origen": "boton_auditoria"},
-                },
-            ).execute()
-            st.success(f"Bitácora respondió correctamente. ID del evento: {response.data}")
-        except Exception as exc:
-            st.error(f"Error de auditoría: {exc}")
 
+    try:
+        rows = (
+            client.table("bitacora_auditoria")
+            .select("id,fecha,usuario_email,usuario_nombre,modulo,accion,entidad,registro_id,descripcion,datos_anteriores,datos_nuevos,metadata")
+            .order("fecha", desc=True)
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        st.error(f"No fue posible consultar la bitácora: {exc}")
+        return
+
+    if not rows:
+        st.info("Todavía no hay eventos registrados en la bitácora.")
+        return
+
+    frame = pd.DataFrame(rows)
+    frame["fecha_dt"] = pd.to_datetime(frame["fecha"], errors="coerce")
+    frame["fecha_local"] = frame["fecha_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    frame["usuario"] = frame["usuario_nombre"].fillna("").astype(str).str.strip()
+    frame.loc[frame["usuario"] == "", "usuario"] = frame["usuario_email"].fillna("")
+    frame["accion"] = frame["accion"].fillna("").astype(str)
+    frame["modulo"] = frame["modulo"].fillna("").astype(str)
+    frame["entidad"] = frame["entidad"].fillna("").astype(str)
+    frame["descripcion"] = frame["descripcion"].fillna("").astype(str)
+
+    st.markdown("### Filtros")
+    f1, f2, f3, f4 = st.columns(4)
+    usuarios = ["Todos"] + sorted([x for x in frame["usuario"].dropna().unique().tolist() if str(x).strip()])
+    modulos = ["Todos"] + sorted([x for x in frame["modulo"].dropna().unique().tolist() if str(x).strip()])
+    acciones = ["Todos"] + sorted([x for x in frame["accion"].dropna().unique().tolist() if str(x).strip()])
+    entidades = ["Todos"] + sorted([x for x in frame["entidad"].dropna().unique().tolist() if str(x).strip()])
+
+    usuario_sel = f1.selectbox("Usuario", usuarios)
+    modulo_sel = f2.selectbox("Módulo", modulos)
+    accion_sel = f3.selectbox("Acción", acciones)
+    entidad_sel = f4.selectbox("Entidad", entidades)
+
+    d1, d2, d3 = st.columns([1, 1, 2])
+    date_values = frame["fecha_dt"].dropna().dt.date
+    min_date = date_values.min() if not date_values.empty else date.today()
+    max_date = date_values.max() if not date_values.empty else date.today()
+    desde = d1.date_input("Desde", value=min_date)
+    hasta = d2.date_input("Hasta", value=max_date)
+    texto = d3.text_input("Buscar", placeholder="Descripción, correo, registro, módulo...")
+
+    filtered = frame.copy()
+    if usuario_sel != "Todos":
+        filtered = filtered[filtered["usuario"] == usuario_sel]
+    if modulo_sel != "Todos":
+        filtered = filtered[filtered["modulo"] == modulo_sel]
+    if accion_sel != "Todos":
+        filtered = filtered[filtered["accion"] == accion_sel]
+    if entidad_sel != "Todos":
+        filtered = filtered[filtered["entidad"] == entidad_sel]
+
+    filtered = filtered[
+        filtered["fecha_dt"].isna()
+        | (
+            (filtered["fecha_dt"].dt.date >= desde)
+            & (filtered["fecha_dt"].dt.date <= hasta)
+        )
+    ]
+
+    if texto.strip():
+        needle = re.escape(texto.strip().lower())
+        search_series = (
+            filtered["descripcion"].astype(str)
+            + " "
+            + filtered["usuario_email"].fillna("").astype(str)
+            + " "
+            + filtered["registro_id"].fillna("").astype(str)
+            + " "
+            + filtered["modulo"].astype(str)
+            + " "
+            + filtered["entidad"].astype(str)
+        ).str.lower()
+        filtered = filtered[search_series.str.contains(needle, regex=True, na=False)]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Eventos visibles", len(filtered))
+    c2.metric("Usuarios", filtered["usuario"].nunique() if not filtered.empty else 0)
+    c3.metric("Módulos", filtered["modulo"].nunique() if not filtered.empty else 0)
+
+    display_cols = ["fecha_local", "usuario", "modulo", "accion", "entidad", "registro_id", "descripcion"]
+    display = filtered[display_cols].rename(columns={
+        "fecha_local": "Fecha",
+        "usuario": "Usuario",
+        "modulo": "Módulo",
+        "accion": "Acción",
+        "entidad": "Entidad",
+        "registro_id": "Registro",
+        "descripcion": "Descripción",
+    })
+
+    st.markdown("### Eventos")
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    csv_data = display.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "Descargar bitácora filtrada (CSV)",
+        data=csv_data,
+        file_name=f"bitacora_coinvierte_{date.today().isoformat()}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    if not filtered.empty:
+        st.markdown("### Detalle de evento")
+        labels = {}
+        for _, row in filtered.head(200).iterrows():
+            label = f"{row.get('fecha_local','')} · {row.get('usuario','')} · {row.get('accion','')} · {row.get('entidad','')}"
+            labels[label] = row
+        selected_label = st.selectbox("Selecciona un evento", list(labels.keys()))
+        selected = labels[selected_label]
+        with st.container(border=True):
+            st.markdown(f"**Fecha:** {selected.get('fecha_local') or ''}")
+            st.markdown(f"**Usuario:** {selected.get('usuario') or ''}")
+            st.markdown(f"**Correo:** {selected.get('usuario_email') or ''}")
+            st.markdown(f"**Módulo:** {selected.get('modulo') or ''}")
+            st.markdown(f"**Acción:** {selected.get('accion') or ''}")
+            st.markdown(f"**Entidad:** {selected.get('entidad') or ''}")
+            st.markdown(f"**Registro:** {selected.get('registro_id') or 'Sin identificador'}")
+            st.markdown(f"**Descripción:** {selected.get('descripcion') or 'Sin descripción'}")
+            if selected.get("datos_anteriores"):
+                st.markdown("**Datos anteriores**")
+                st.json(selected.get("datos_anteriores"))
+            if selected.get("datos_nuevos"):
+                st.markdown("**Datos nuevos**")
+                st.json(selected.get("datos_nuevos"))
+            if selected.get("metadata"):
+                st.markdown("**Metadata**")
+                st.json(selected.get("metadata"))
 
 def user_management():
     st.title("Gestión de usuarios")
