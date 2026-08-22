@@ -59,6 +59,43 @@ def is_master_admin() -> bool:
     return str(st.session_state.get("user", {}).get("email") or "").strip().lower() == MASTER_ADMIN_EMAIL
 
 
+def audit_event(
+    client,
+    *,
+    modulo: str,
+    accion: str,
+    entidad: str,
+    registro_id: str | None = None,
+    descripcion: str | None = None,
+    datos_anteriores=None,
+    datos_nuevos=None,
+    metadata=None,
+) -> None:
+    """Registra una acción funcional relevante sin interrumpir la operación principal si la bitácora falla."""
+    user = st.session_state.get("user", {}) or {}
+    if not client or not user.get("id"):
+        return
+    try:
+        client.rpc(
+            "registrar_evento_auditoria",
+            {
+                "p_usuario_email": user.get("email"),
+                "p_usuario_nombre": user.get("nombre") or user.get("email"),
+                "p_modulo": modulo,
+                "p_accion": accion,
+                "p_entidad": entidad,
+                "p_registro_id": str(registro_id) if registro_id is not None else None,
+                "p_descripcion": descripcion,
+                "p_datos_anteriores": datos_anteriores,
+                "p_datos_nuevos": datos_nuevos,
+                "p_metadata": metadata,
+            },
+        ).execute()
+    except Exception as exc:
+        # Diagnóstico temporal: mostrar el motivo exacto si la bitácora no puede escribirse.
+        st.error(f"Error de auditoría: {exc}")
+
+
 def _remove_storage_paths(client, paths: list[str]) -> None:
     clean = list(dict.fromkeys(str(path) for path in paths if path))
     for start in range(0, len(clean), 100):
@@ -66,12 +103,21 @@ def _remove_storage_paths(client, paths: list[str]) -> None:
 
 
 def delete_project_master(client, project_id: str) -> None:
+    project_rows = client.table("proyectos").select("id,nombre,direccion,solicitante,municipio,anio_inicio,monto").eq("id", project_id).limit(1).execute().data or []
+    project_snapshot = project_rows[0] if project_rows else {"id": project_id}
     documents = client.table("documentos").select("ruta_storage").eq("proyecto_id", project_id).execute().data or []
     _remove_storage_paths(client, [row.get("ruta_storage") for row in documents])
     client.table("proyectos").delete().eq("id", project_id).execute()
+    audit_event(
+        client, modulo=MODULE_PROJECTS, accion="DELETE", entidad="proyecto", registro_id=project_id,
+        descripcion=f"Eliminó definitivamente el proyecto {project_snapshot.get('nombre') or project_id}.",
+        datos_anteriores=project_snapshot,
+    )
 
 
 def delete_board_session_master(client, session_id: str) -> None:
+    session_rows = client.table("sesiones_junta").select("id,anio,tipo,nombre,fecha_sesion").eq("id", session_id).limit(1).execute().data or []
+    session_snapshot = session_rows[0] if session_rows else {"id": session_id}
     documents = client.table("documentos_sesion_junta").select("ruta_storage").eq("sesion_id", session_id).execute().data or []
     agreements = client.table("acuerdos_junta").select("id").eq("sesion_id", session_id).execute().data or []
     agreement_ids = [row["id"] for row in agreements]
@@ -80,9 +126,17 @@ def delete_board_session_master(client, session_id: str) -> None:
         agreement_files = client.table("archivos_acuerdo").select("ruta_storage").in_("acuerdo_id", agreement_ids).execute().data or []
     _remove_storage_paths(client, [row.get("ruta_storage") for row in documents + agreement_files])
     client.table("sesiones_junta").delete().eq("id", session_id).execute()
+    audit_event(
+        client, modulo=MODULE_BOARD, accion="DELETE", entidad="sesion_junta", registro_id=session_id,
+        descripcion=f"Eliminó definitivamente la sesión {session_snapshot.get('nombre') or session_id} de Junta de Gobierno.",
+        datos_anteriores=session_snapshot,
+        metadata={"acuerdos_eliminados": len(agreement_ids), "documentos_sesion": len(documents), "archivos_acuerdos": len(agreement_files)},
+    )
 
 
 def delete_committee_session_master(client, session_id: str) -> None:
+    session_rows = client.table("sesiones_comite").select("id,comite,anio,tipo,nombre,fecha_sesion").eq("id", session_id).limit(1).execute().data or []
+    session_snapshot = session_rows[0] if session_rows else {"id": session_id}
     documents = client.table("documentos_sesion_comite").select("ruta_storage").eq("sesion_id", session_id).execute().data or []
     agreements = client.table("acuerdos_comite").select("id").eq("sesion_id", session_id).execute().data or []
     agreement_ids = [row["id"] for row in agreements]
@@ -92,6 +146,12 @@ def delete_committee_session_master(client, session_id: str) -> None:
                           .in_("acuerdo_id", agreement_ids).execute().data or [])
     _remove_storage_paths(client, [row.get("ruta_storage") for row in documents + followup_files])
     client.table("sesiones_comite").delete().eq("id", session_id).execute()
+    audit_event(
+        client, modulo=MODULE_COMMITTEES, accion="DELETE", entidad="sesion_comite", registro_id=session_id,
+        descripcion=f"Eliminó definitivamente la sesión {session_snapshot.get('nombre') or session_id} de {session_snapshot.get('comite') or 'Comité'}.",
+        datos_anteriores=session_snapshot,
+        metadata={"acuerdos_eliminados": len(agreement_ids), "documentos_sesion": len(documents), "archivos_seguimiento": len(followup_files)},
+    )
 
 
 def master_delete_control(label: str, object_id: str, key: str, delete_action) -> None:
@@ -662,9 +722,17 @@ def _upload_transfer_document(client, project_id: str, transfer_id: str, documen
 
 
 def _delete_transfer(client, transfer: dict, project: dict) -> None:
+    transfer_snapshot = dict(transfer or {})
     documents = _transfer_documents(client, str(transfer["id"]))
     _remove_storage_paths(client, [row.get("ruta_storage") for row in documents])
     client.table("transferencias_proyecto").delete().eq("id", transfer["id"]).execute()
+    audit_event(
+        client, modulo=MODULE_PROJECTS, accion="DELETE", entidad="transferencia_proyecto",
+        registro_id=str(transfer["id"]),
+        descripcion=f"Eliminó una transferencia del proyecto {project.get('nombre') or project.get('id') or ''} por ${float(transfer.get('importe') or 0):,.2f} MXN.",
+        datos_anteriores=transfer_snapshot,
+        metadata={"proyecto_id": str(project.get("id") or ""), "documentos_eliminados": len(documents)},
+    )
     _sync_project_financial_progress(client, project)
 
 
@@ -1222,12 +1290,44 @@ def view_active_projects(direction: str):
         st.rerun()
 
 
+def audit_page():
+    st.title("Auditoría")
+    if not is_master_admin():
+        st.error("No tienes permisos para acceder a este módulo.")
+        return
+
+    client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+    st.caption("Diagnóstico de la bitácora funcional del Tablero COINVIERTE.")
+    if st.button("Probar bitácora", key="test_audit_log_button", use_container_width=True, type="primary"):
+        user = st.session_state.get("user", {}) or {}
+        try:
+            response = client.rpc(
+                "registrar_evento_auditoria",
+                {
+                    "p_usuario_email": user.get("email"),
+                    "p_usuario_nombre": user.get("nombre") or user.get("email"),
+                    "p_modulo": "Seguridad",
+                    "p_accion": "TEST",
+                    "p_entidad": "bitacora_auditoria",
+                    "p_registro_id": None,
+                    "p_descripcion": "Prueba manual de bitácora desde Tablero COINVIERTE",
+                    "p_datos_anteriores": None,
+                    "p_datos_nuevos": None,
+                    "p_metadata": {"origen": "boton_auditoria"},
+                },
+            ).execute()
+            st.success(f"Bitácora respondió correctamente. ID del evento: {response.data}")
+        except Exception as exc:
+            st.error(f"Error de auditoría: {exc}")
+
+
 def user_management():
     st.title("Gestión de usuarios")
     if st.session_state.user.get("rol") != "administrador":
         st.error("No tienes permisos para acceder a este módulo.")
         return
     client = client_with_token(st.session_state.access_token, st.session_state.refresh_token)
+
     create_tab, users_tab = st.tabs(["Generar código temporal", "Usuarios autorizados"])
     with create_tab:
         st.markdown("### Autorizar a una persona")
@@ -1294,19 +1394,47 @@ def user_management():
                     elif MODULE_PROJECTS in edit_modules and not edit_project_directions:
                         st.error("Selecciona al menos un área de Proyectos.")
                     else:
-                        client.table("usuarios_autorizados").update({"direccion": edit_direction, "modulos": edit_modules,
-                            "direcciones_proyectos": edit_project_directions, "updated_at": datetime.now().isoformat()}).eq("id", selected["id"]).execute()
+                        before_permissions = {
+                            "direccion": selected.get("direccion"),
+                            "modulos": selected.get("modulos") or [],
+                            "direcciones_proyectos": selected.get("direcciones_proyectos") or [],
+                        }
+                        after_permissions = {
+                            "direccion": edit_direction,
+                            "modulos": edit_modules,
+                            "direcciones_proyectos": edit_project_directions,
+                        }
+                        client.table("usuarios_autorizados").update({**after_permissions,
+                            "updated_at": datetime.now().isoformat()}).eq("id", selected["id"]).execute()
+                        audit_event(
+                            client, modulo="Administración de usuarios", accion="UPDATE", entidad="usuario_autorizado",
+                            registro_id=str(selected["id"]),
+                            descripcion=f"Actualizó dirección y permisos de {selected.get('email') or selected.get('nombre') or selected['id']}.",
+                            datos_anteriores=before_permissions, datos_nuevos=after_permissions,
+                        )
                         st.success("Dirección y permisos actualizados.")
                         st.rerun()
                 c1, c2 = st.columns(2)
                 if selected.get("activo"):
                     if c1.button("Suspender acceso", use_container_width=True):
                         client.table("usuarios_autorizados").update({"activo": False}).eq("id", selected["id"]).execute()
+                        audit_event(
+                            client, modulo="Administración de usuarios", accion="SUSPEND", entidad="usuario_autorizado",
+                            registro_id=str(selected["id"]),
+                            descripcion=f"Suspendió el acceso de {selected.get('email') or selected.get('nombre') or selected['id']}.",
+                            datos_anteriores={"activo": True}, datos_nuevos={"activo": False},
+                        )
                         st.success("Acceso suspendido.")
                         st.rerun()
                 else:
                     if c1.button("Reactivar acceso", use_container_width=True):
                         client.table("usuarios_autorizados").update({"activo": True}).eq("id", selected["id"]).execute()
+                        audit_event(
+                            client, modulo="Administración de usuarios", accion="REACTIVATE", entidad="usuario_autorizado",
+                            registro_id=str(selected["id"]),
+                            descripcion=f"Reactivó el acceso de {selected.get('email') or selected.get('nombre') or selected['id']}.",
+                            datos_anteriores={"activo": False}, datos_nuevos={"activo": True},
+                        )
                         st.success("Acceso reactivado.")
                         st.rerun()
                 if c2.button("Generar nuevo código", use_container_width=True):
@@ -1338,7 +1466,18 @@ def user_management():
                 confirm_remove = st.checkbox(f"Confirmo que deseo remover el acceso de {selected.get('nombre') or selected['email']}",
                                              key=f"confirm_remove_{selected['id']}")
                 if st.button("Remover usuario", disabled=not confirm_remove, key=f"remove_user_{selected['id']}"):
+                    removed_snapshot = {
+                        "id": selected.get("id"), "email": selected.get("email"), "nombre": selected.get("nombre"),
+                        "direccion": selected.get("direccion"), "modulos": selected.get("modulos") or [],
+                        "direcciones_proyectos": selected.get("direcciones_proyectos") or [], "activo": selected.get("activo"),
+                    }
                     client.rpc("remover_usuario_autorizado", {"p_usuario_id": selected["id"]}).execute()
+                    audit_event(
+                        client, modulo="Administración de usuarios", accion="REMOVE", entidad="usuario_autorizado",
+                        registro_id=str(selected["id"]),
+                        descripcion=f"Removió el acceso de {selected.get('email') or selected.get('nombre') or selected['id']}.",
+                        datos_anteriores=removed_snapshot,
+                    )
                     st.success("El acceso fue removido. Sus aportaciones y documentos históricos se conservaron.")
                     st.rerun()
 
@@ -1685,8 +1824,20 @@ def _document_card(client, document: dict, key_prefix: str, table_name: str):
                 st.warning(f"¿Eliminar definitivamente “{document.get('nombre_visible') or filename}” del expediente?")
                 confirm_col, cancel_col, _ = st.columns([1, 1, 4])
                 if confirm_col.button("Sí, eliminar", key=f"{key_prefix}_confirm_{document['id']}", type="primary"):
+                    document_snapshot = {
+                        "id": document.get("id"), "tabla": table_name,
+                        "nombre_visible": document.get("nombre_visible"), "nombre_archivo": document.get("nombre_archivo"),
+                        "tipo_documento": document.get("tipo_documento"), "ruta_storage": document.get("ruta_storage"),
+                        "mime_type": document.get("mime_type"), "tamano_bytes": document.get("tamano_bytes"),
+                    }
                     client.storage.from_("expedientes").remove([document["ruta_storage"]])
                     client.table(table_name).delete().eq("id", document["id"]).execute()
+                    audit_event(
+                        client, modulo="Gestión documental", accion="DELETE", entidad="documento",
+                        registro_id=str(document.get("id") or ""),
+                        descripcion=f"Eliminó el documento {document.get('nombre_visible') or filename} del expediente.",
+                        datos_anteriores=document_snapshot, metadata={"tabla_origen": table_name},
+                    )
                     if table_name == "documentos_sesion_junta" and document.get("tipo_documento") == "Acta firmada":
                         client.table("sesiones_junta").update({"acta_firmada_nombre": None, "acta_firmada_ruta": None}).eq("id", document.get("sesion_id")).execute()
                         if st.session_state.get("board_session", {}).get("id") == document.get("sesion_id"):
@@ -5859,6 +6010,10 @@ else:
             if st.button("Gestión de usuarios", use_container_width=True):
                 st.session_state.page = "Gestión de usuarios"
                 st.rerun()
+        if is_master_admin():
+            if st.button("Auditoría", use_container_width=True):
+                st.session_state.page = "Auditoría"
+                st.rerun()
         st.divider()
         if st.button("Cerrar sesión", use_container_width=True):
             st.session_state.clear()
@@ -5868,6 +6023,7 @@ else:
     elif page == "Programas / Proyectos": programs()
     elif page == "Junta de Gobierno": board_government()
     elif page == "Gestión de usuarios": user_management()
+    elif page == "Auditoría": audit_page()
     elif page == "Comités" and user_can(MODULE_COMMITTEES): committees()
     elif page == "Comités": st.error("No tienes permisos para acceder a Comités.")
     elif page == "Oficios Dirección General" and user_can(MODULE_OFFICIAL_LETTERS): official_letters()
